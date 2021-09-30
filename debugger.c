@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <elfutils/libdwfl.h>
+#include "debugger.h"
 
 typedef struct Breakpoint {
     const char *name;
@@ -19,19 +20,20 @@ typedef struct Breakpoint {
 
 typedef struct {
     pid_t child;
+    DebuggerCallbacks *callbacks;
     Breakpoint *breakpoints;
 } Debugger;
 
 char int3_buf[sizeof(void*)] = {0xCC};
 
-int callback(Dwfl_Module *mod, void ** x,
-             const char *name, Dwarf_Addr addr,
-			 void *arg)
+static
+int collect_infos(Dwfl_Module *mod, void ** x,
+                  const char *name, Dwarf_Addr addr,
+			      void *arg)
 {
     Debugger *debugger = (Debugger *) arg;
 
     int n_sym = dwfl_module_getsymtab(mod);
-
     for (int i = 0; i < n_sym; i++) {
         GElf_Sym sym;
         GElf_Word shndx;
@@ -45,31 +47,53 @@ int callback(Dwfl_Module *mod, void ** x,
 					    &elf, &bias);
 
         size_t len = strlen(name);
-        if (len > 5 && strcmp(name+len-5, "_info") == 0) {
-            Breakpoint *breakpoint = malloc(sizeof(Breakpoint));
-            breakpoint->name = name;
-            breakpoint->addr = addr;
-            breakpoint->next = debugger->breakpoints;
-            debugger->breakpoints = breakpoint;
-
-            breakpoint->save_word =
+        if (len > 5 && strcmp(name+len-5, "_info") == 0 &&
+            strcmp(name, "_dl_get_tls_static_info") != 0 &&
+            strcmp(name, "version_info") != 0) {
+            long save_word =
                 ptrace(PTRACE_PEEKDATA, debugger->child, addr, NULL);
             ptrace(PTRACE_POKEDATA, debugger->child, addr, *((void**) &int3_buf));
+
+            StgInfoTable infoTable;
+
+            GElf_Addr infoTable_addr = addr - sizeof(StgInfoTable);
+            int i = 0;
+            while (i < sizeof(StgInfoTable) / sizeof(long)) {
+                ((long *) &infoTable)[i] =
+                    ptrace(PTRACE_PEEKDATA,
+                           debugger->child,
+                           infoTable_addr + i * sizeof(long),
+                           NULL);
+                i++;
+            }
+            int j = sizeof(StgInfoTable) % sizeof(long);
+            if (j != 0) {
+                long val =
+                    ptrace(PTRACE_PEEKDATA,
+                           debugger->child,
+                           infoTable_addr + i * sizeof(long),
+                           NULL);
+                memcpy(((long *) &infoTable)+i, &val, j);
+            }
+
+            debugger->callbacks->register_info(name,addr,save_word,&infoTable);
         }
     }
 
     return DWARF_CB_OK;
 }
 
-int main()
+int debugger_execv(char *pathname, char *const argv[],
+                   DebuggerCallbacks* callbacks)
 {
     Debugger debugger;
+    debugger.callbacks = callbacks;
     debugger.breakpoints = NULL;
 
     debugger.child = fork();
     if (debugger.child == 0) {
         ptrace(PTRACE_TRACEME, 0, NULL, NULL);
-        execl("fib", "fib", NULL);
+        execv(pathname, argv);
     } else {
         int initilized = 0;
 
@@ -89,27 +113,23 @@ int main()
                 };
                 Dwfl *dwfl = dwfl_begin(&proc_callbacks);
                 if (dwfl == NULL) {
-                    printf("dwfl_begin failed\n");
                     return -1;
                 }
 
                 int ret = dwfl_linux_proc_report(dwfl, debugger.child);
                 if (ret < 0) {
-                    printf("dwfl_linux_proc_report failed\n");
                     return -1;
                 }
                 
                 if (dwfl_report_end(dwfl, NULL, NULL) != 0) {
-                    printf("dwfl_report_end failed\n");
                     return -1;
                 }
 
                 if (dwfl_linux_proc_attach(dwfl, debugger.child, true) < 0) {
-                    printf("dwfl_linux_proc_attach failed\n");
                     return -1;
                 }
 
-                dwfl_getmodules(dwfl, callback, &debugger, 0);
+                dwfl_getmodules(dwfl, collect_infos, &debugger, 0);
 
                 initilized = 1;
 
@@ -119,22 +139,15 @@ int main()
                 ptrace(PTRACE_GETREGS, debugger.child, NULL, &regs);
                 regs.rip--;
 
-                Breakpoint *breakpoint = debugger.breakpoints;
-                while (breakpoint != NULL) {
-                    if (breakpoint->addr == regs.rip) {
-                        printf("%s\n", breakpoint->name);
-
-                        ptrace(PTRACE_POKEDATA, debugger.child, breakpoint->addr, (void*)breakpoint->save_word);
-                        ptrace(PTRACE_SETREGS, debugger.child, NULL, &regs);
-                        ptrace(PTRACE_SINGLESTEP, debugger.child, NULL, NULL);
-                        ptrace(PTRACE_POKEDATA, debugger.child, breakpoint->addr, *((void**) &int3_buf));
-                        break;
-                    }
-                    breakpoint = breakpoint->next;
+                long save_word;
+                if (debugger.callbacks->breakpoint_hit(regs.rip, &save_word)) {
+                    ptrace(PTRACE_POKEDATA, debugger.child, regs.rip, (void*)save_word);
+                    ptrace(PTRACE_SETREGS, debugger.child, NULL, &regs);
+                    ptrace(PTRACE_SINGLESTEP, debugger.child, NULL, NULL);
+                    ptrace(PTRACE_POKEDATA, debugger.child, regs.rip, *((void**) &int3_buf));
                 }
                 ptrace(PTRACE_CONT, debugger.child, NULL, NULL);
             }
         }
     }
-    return 0;
 }
