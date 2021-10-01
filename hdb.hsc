@@ -91,8 +91,21 @@ main = do
                 SMALL_MUT_ARR_PTRS_DIRTY -> smallMutArrPtrsClosure
                 SMALL_MUT_ARR_PTRS_FROZEN_DIRTY -> smallMutArrPtrsClosure
                 SMALL_MUT_ARR_PTRS_FROZEN_CLEAN -> smallMutArrPtrsClosure-}
-                _             -> do (ps,ws) <- peekContent itbl pclosure
-                                    return (OtherClosure itbl ps ws)
+                _ | name == "base_GHCziInt_Izh_con_info" -> do
+                                 ([],[w]) <- peekContent itbl pclosure
+                                 return (Int64Closure PInt (fromIntegral w))
+                _ | name == "base_GHCziWord_Wzh_con_info" -> do
+                                 ([],[w]) <- peekContent itbl pclosure
+                                 return (Word64Closure PWord (fromIntegral w))
+                _ | name == "base_GHCziInt_I64zh_con_info" -> do
+                                 ([],[w]) <- peekContent itbl pclosure
+                                 return (Int64Closure PInt64 (fromIntegral w))
+                _ | name == "base_GHCziWord_W64zh_con_info" -> do
+                                 ([],[w]) <- peekContent itbl pclosure
+                                 return (Word64Closure PWord64 (fromIntegral w))
+                  | otherwise                              -> do
+                                 (ps,ws) <- peekContent itbl pclosure
+                                 return (OtherClosure itbl ps ws)
           | otherwise = return (UnsupportedClosure itbl)
           where
             constrClosure = do
