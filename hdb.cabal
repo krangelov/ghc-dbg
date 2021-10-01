@@ -1,0 +1,26 @@
+name: hdb
+version: 0.1
+
+cabal-version: 1.22
+build-type: Simple
+license: BSD
+category: Debugger
+synopsis: An experimental debugger for Haskell
+tested-with: GHC==8.6.5
+
+source-repository head
+  type: git
+  location: git@github.com:krangelov/hdb.git
+
+executable hdb
+  main-is: main.hs
+  default-language:    Haskell2010
+  build-depends: ghc-heap,
+                 base,
+                 containers
+
+  other-modules:
+    HDB
+  extra-libraries: dw
+  c-sources: debugger.c
+  include-dirs: .
