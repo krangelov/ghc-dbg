@@ -1,4 +1,4 @@
-module HDB(startDebugger) where
+module HDB(startDebugger,HeapPtr,Debugger(..)) where
 
 import Foreign
 import Foreign.C
@@ -12,7 +12,12 @@ import GHC.Exts.Heap.InfoTable
 
 type HeapPtr = (#type GElf_Addr)
 
-startDebugger :: [String] -> (String -> GenClosure HeapPtr -> IO ()) -> IO ()
+data Debugger
+  = Debugger {
+      peekClosure :: HeapPtr -> IO (Maybe (String,GenClosure HeapPtr))
+    }
+
+startDebugger :: [String] -> (Debugger -> String -> GenClosure HeapPtr -> IO ()) -> IO ()
 startDebugger args handleEvent =
   withArgs args $ \c_prog_args@(c_prog:_) ->
   withArray0 nullPtr c_prog_args $ \c_prog_args ->
@@ -41,14 +46,25 @@ startDebugger args handleEvent =
           breakpoints <- readIORef ref
           writeIORef ref $! Map.insert addr (name,save_word,itbl) breakpoints
 
-        breakpoint_hit ref addr pclosure p_save_word = do
+        breakpoint_hit ref dbg addr pclosure p_save_word = do
           breakpoints <- readIORef ref
           case Map.lookup addr breakpoints of
             Just (name,save_word,itbl) -> do poke p_save_word save_word
                                              mb_closure <- peekClosure name itbl pclosure        
-                                             handleEvent name mb_closure
+                                             handleEvent (wrapDebugger ref dbg) name mb_closure
                                              return 1
             Nothing                    -> do return 0
+
+    wrapDebugger ref dbg = Debugger peek
+      where
+        peek addr =
+          bracket (debugger_copy_closure dbg addr) free $ \pclosure -> do
+            breakpoints <- readIORef ref
+            info_ptr <- (#peek StgClosure, header.info) pclosure
+            case Map.lookup info_ptr breakpoints of
+              Nothing            -> return Nothing
+              Just (name,_,itbl) -> do clo <- peekClosure name itbl pclosure
+                                       return (Just (name,clo))
 
     peekClosure name itbl pclosure
       | pclosure /= nullPtr =
@@ -158,8 +174,8 @@ startDebugger args handleEvent =
           return (SmallMutArrClosure itbl w1 w2 ps) -}
 
         peekContent itbl pclosure = do
-          let pptrs  = castPtr pclosure :: Ptr HeapPtr
-              pwords = castPtr (pclosure `plusPtr` (fromIntegral (ptrs itbl * #size StgWord))) :: Ptr Word
+          let pptrs  = castPtr (pclosure `plusPtr` (#size StgHeader)) :: Ptr HeapPtr
+              pwords = castPtr (pptrs    `plusPtr` (fromIntegral (ptrs itbl * #size StgWord))) :: Ptr Word
           ps <- peekArray (fromIntegral (ptrs  itbl)) pptrs
           ws <- peekArray (fromIntegral (nptrs itbl)) pwords
           return (ps,ws)
@@ -172,12 +188,14 @@ data DebuggerCallbacks
 foreign import ccall debugger_execv :: CString -> Ptr CString ->
                                        Ptr DebuggerCallbacks -> IO ()
 
+foreign import ccall debugger_copy_closure :: Ptr Debugger -> HeapPtr -> IO (Ptr ())
+
 type RegisterInfo = CString -> (#type GElf_Addr) -> (#type long) -> Ptr StgInfoTable -> IO ()
 
 foreign import ccall "wrapper"
   wrapRegisterInfo :: RegisterInfo -> IO (FunPtr RegisterInfo)
 
-type BreakpointHit = (#type GElf_Addr) -> Ptr () -> Ptr (#type long) -> IO CInt
+type BreakpointHit = Ptr Debugger -> (#type GElf_Addr) -> Ptr () -> Ptr (#type long) -> IO CInt
 
 foreign import ccall "wrapper"
   wrapBreakpointHit :: BreakpointHit -> IO (FunPtr BreakpointHit)

@@ -11,11 +11,11 @@
 #include <elfutils/libdwfl.h>
 #include "debugger.h"
 
-typedef struct {
+struct Debugger {
     pid_t child;
     DebuggerCallbacks *callbacks;
     Dwfl *dwfl;
-} Debugger;
+};
 
 char int3_buf[sizeof(void*)] = {0xCC};
 
@@ -44,19 +44,18 @@ void copy_infotable(Debugger *debugger,
 }
 
 static
-void *copy_closure(Debugger *debugger,
-                   GElf_Addr addr, StgInfoTable *infoTable)
+StgClosure *copy_closure(Debugger *debugger,
+                         GElf_Addr addr, StgInfoTable *infoTable)
 {
     int size =
+        sizeof(StgHeader) +
         (infoTable->layout.payload.ptrs +
          infoTable->layout.payload.nptrs) * sizeof(StgWord);
     int count = size / sizeof(long);
 
-    void *closure = malloc(size);
+    StgClosure *closure = malloc(size);
     if (!closure)
         return NULL;
-
-    addr += sizeof(StgHeader);
 
     int i = 0;
     while (i < count) {
@@ -225,7 +224,7 @@ int debugger_execv(char *pathname, char *const argv[],
                 }
 
                 long save_word;
-                if (debugger.callbacks->breakpoint_hit(regs.rip, closure, &save_word)) {
+                if (debugger.callbacks->breakpoint_hit(&debugger, regs.rip, closure, &save_word)) {
                     ptrace(PTRACE_POKEDATA, debugger.child, regs.rip, (void*)save_word);
                     ptrace(PTRACE_SETREGS, debugger.child, NULL, &regs);
                     ptrace(PTRACE_SINGLESTEP, debugger.child, NULL, NULL);
@@ -242,4 +241,17 @@ int debugger_execv(char *pathname, char *const argv[],
         if (debugger.dwfl != NULL)
             dwfl_end(debugger.dwfl);
     }
+}
+
+StgClosure *debugger_copy_closure(Debugger *debugger, GElf_Addr addr)
+{
+    addr = addr & ~0b111;
+
+    GElf_Addr infoTable_addr =
+        ptrace(PTRACE_PEEKDATA, debugger->child, addr, NULL);
+
+    StgInfoTable infoTable;
+    copy_infotable(debugger, infoTable_addr, &infoTable);
+
+    return copy_closure(debugger, addr, &infoTable);
 }
