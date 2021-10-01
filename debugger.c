@@ -11,17 +11,10 @@
 #include <elfutils/libdwfl.h>
 #include "debugger.h"
 
-typedef struct Breakpoint {
-    const char *name;
-    GElf_Addr addr;
-    long save_word;
-    struct Breakpoint *next;
-} Breakpoint;
-
 typedef struct {
     pid_t child;
     DebuggerCallbacks *callbacks;
-    Breakpoint *breakpoints;
+    Dwfl *dwfl;
 } Debugger;
 
 char int3_buf[sizeof(void*)] = {0xCC};
@@ -130,7 +123,7 @@ int debugger_execv(char *pathname, char *const argv[],
 {
     Debugger debugger;
     debugger.callbacks = callbacks;
-    debugger.breakpoints = NULL;
+    debugger.dwfl = NULL;
 
     debugger.child = fork();
     if (debugger.child == 0) {
@@ -153,25 +146,25 @@ int debugger_execv(char *pathname, char *const argv[],
                     .debuginfo_path = &debuginfo_path,
                     .find_elf = dwfl_linux_proc_find_elf,
                 };
-                Dwfl *dwfl = dwfl_begin(&proc_callbacks);
-                if (dwfl == NULL) {
+                debugger.dwfl = dwfl_begin(&proc_callbacks);
+                if (debugger.dwfl == NULL) {
                     return -1;
                 }
 
-                int ret = dwfl_linux_proc_report(dwfl, debugger.child);
+                int ret = dwfl_linux_proc_report(debugger.dwfl, debugger.child);
                 if (ret < 0) {
                     return -1;
                 }
                 
-                if (dwfl_report_end(dwfl, NULL, NULL) != 0) {
+                if (dwfl_report_end(debugger.dwfl, NULL, NULL) != 0) {
                     return -1;
                 }
 
-                if (dwfl_linux_proc_attach(dwfl, debugger.child, true) < 0) {
+                if (dwfl_linux_proc_attach(debugger.dwfl, debugger.child, true) < 0) {
                     return -1;
                 }
 
-                dwfl_getmodules(dwfl, collect_infos, &debugger, 0);
+                dwfl_getmodules(debugger.dwfl, collect_infos, &debugger, 0);
 
                 initilized = 1;
 
@@ -245,5 +238,8 @@ int debugger_execv(char *pathname, char *const argv[],
                 ptrace(PTRACE_CONT, debugger.child, NULL, NULL);
             }
         }
+
+        if (debugger.dwfl != NULL)
+            dwfl_end(debugger.dwfl);
     }
 }
