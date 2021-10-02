@@ -7,7 +7,7 @@
 typedef struct Debugger Debugger;
 
 typedef struct {
-    void (*register_info)(const char* name, GElf_Addr addr, long save_word,
+    void (*register_info)(const char* name, GElf_Addr addr, uint8_t save_byte,
                           StgInfoTable *infoTable);
     int (*breakpoint_hit)(Debugger *debugger,
                           GElf_Addr addr, void *closure, long *save_word);

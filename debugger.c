@@ -17,8 +17,6 @@ struct Debugger {
     Dwfl *dwfl;
 };
 
-char int3_buf[sizeof(void*)] = {0xCC};
-
 static
 void copy_infotable(Debugger *debugger,
                     GElf_Addr addr, StgInfoTable *infoTable)
@@ -103,14 +101,18 @@ int collect_infos(Dwfl_Module *mod, void ** x,
         if (len > 5 && strcmp(name+len-5, "_info") == 0 &&
             strcmp(name, "_dl_get_tls_static_info") != 0 &&
             strcmp(name, "version_info") != 0) {
-            long save_word =
+
+            uint8_t int3_buf[sizeof(long)];
+            *((long*) &int3_buf) =
                 ptrace(PTRACE_PEEKDATA, debugger->child, addr, NULL);
+            uint8_t save_byte = int3_buf[0];
+            int3_buf[0] = 0xCC;
             ptrace(PTRACE_POKEDATA, debugger->child, addr, *((void**) &int3_buf));
 
             StgInfoTable infoTable;
             copy_infotable(debugger, addr - sizeof(StgInfoTable), &infoTable);
 
-            debugger->callbacks->register_info(name,addr,save_word,&infoTable);
+            debugger->callbacks->register_info(name,addr,save_byte,&infoTable);
         }
     }
 
@@ -219,15 +221,25 @@ int debugger_execv(char *pathname, char *const argv[],
                     infoTable.type == SMALL_MUT_ARR_PTRS_FROZEN_DIRTY ||
                     infoTable.type == SMALL_MUT_ARR_PTRS_FROZEN_CLEAN) {
 
-                    GElf_Addr addr = (GElf_Addr) (regs.rbx & ~0b111);
+                    GElf_Addr addr = (GElf_Addr) (regs.rbx & ~TAG_MASK);
                     closure = copy_closure(&debugger, addr, &infoTable);
                 }
 
-                long save_word;
-                if (debugger.callbacks->breakpoint_hit(&debugger, regs.rip, closure, &save_word)) {
-                    ptrace(PTRACE_POKEDATA, debugger.child, regs.rip, (void*)save_word);
+                uint8_t save_byte;
+                if (debugger.callbacks->breakpoint_hit(&debugger, regs.rip, closure, &save_byte)) {
+                    uint8_t int3_buf[sizeof(long)];
+
+                    *((long*) &int3_buf) =
+                        ptrace(PTRACE_PEEKDATA, debugger.child, regs.rip, NULL);
+                    int3_buf[0] = save_byte;
+                    ptrace(PTRACE_POKEDATA, debugger.child, regs.rip, *((void**) &int3_buf));
+
                     ptrace(PTRACE_SETREGS, debugger.child, NULL, &regs);
                     ptrace(PTRACE_SINGLESTEP, debugger.child, NULL, NULL);
+
+                    *((long*) &int3_buf) =
+                        ptrace(PTRACE_PEEKDATA, debugger.child, regs.rip, NULL);
+                    int3_buf[0] = 0xCC;
                     ptrace(PTRACE_POKEDATA, debugger.child, regs.rip, *((void**) &int3_buf));
                 }
 
@@ -245,13 +257,13 @@ int debugger_execv(char *pathname, char *const argv[],
 
 StgClosure *debugger_copy_closure(Debugger *debugger, GElf_Addr addr)
 {
-    addr = addr & ~0b111;
+    addr = addr & ~TAG_MASK;
 
     GElf_Addr infoTable_addr =
         ptrace(PTRACE_PEEKDATA, debugger->child, addr, NULL);
 
     StgInfoTable infoTable;
-    copy_infotable(debugger, infoTable_addr, &infoTable);
+    copy_infotable(debugger, infoTable_addr - sizeof(StgInfoTable), &infoTable);
 
     return copy_closure(debugger, addr, &infoTable);
 }

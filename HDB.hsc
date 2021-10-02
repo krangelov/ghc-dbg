@@ -40,16 +40,16 @@ startDebugger args handleEvent =
          (#poke DebuggerCallbacks, breakpoint_hit) c_callbacks c_breakpoint_hit
          fn c_callbacks)
       where
-        register_info ref c_name addr save_word c_infoTable = do
+        register_info ref c_name addr save_byte c_infoTable = do
           name <- peekCString c_name
           itbl <- peekItbl c_infoTable
           breakpoints <- readIORef ref
-          writeIORef ref $! Map.insert addr (name,save_word,itbl) breakpoints
+          writeIORef ref $! Map.insert addr (name,save_byte,itbl) breakpoints
 
-        breakpoint_hit ref dbg addr pclosure p_save_word = do
+        breakpoint_hit ref dbg addr pclosure p_save_byte = do
           breakpoints <- readIORef ref
           case Map.lookup addr breakpoints of
-            Just (name,save_word,itbl) -> do poke p_save_word save_word
+            Just (name,save_byte,itbl) -> do poke p_save_byte save_byte
                                              mb_closure <- peekClosure name itbl pclosure        
                                              handleEvent (wrapDebugger ref dbg) name mb_closure
                                              return 1
@@ -190,12 +190,12 @@ foreign import ccall debugger_execv :: CString -> Ptr CString ->
 
 foreign import ccall debugger_copy_closure :: Ptr Debugger -> HeapPtr -> IO (Ptr ())
 
-type RegisterInfo = CString -> (#type GElf_Addr) -> (#type long) -> Ptr StgInfoTable -> IO ()
+type RegisterInfo = CString -> (#type GElf_Addr) -> (#type uint8_t) -> Ptr StgInfoTable -> IO ()
 
 foreign import ccall "wrapper"
   wrapRegisterInfo :: RegisterInfo -> IO (FunPtr RegisterInfo)
 
-type BreakpointHit = Ptr Debugger -> (#type GElf_Addr) -> Ptr () -> Ptr (#type long) -> IO CInt
+type BreakpointHit = Ptr Debugger -> (#type GElf_Addr) -> Ptr () -> Ptr (#type uint8_t) -> IO CInt
 
 foreign import ccall "wrapper"
   wrapBreakpointHit :: BreakpointHit -> IO (FunPtr BreakpointHit)
