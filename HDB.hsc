@@ -92,7 +92,7 @@ startDebugger args handleEvent =
             THUNK_1_1     -> thunkClosure ThunkClosure
             THUNK_0_2     -> thunkClosure ThunkClosure
             THUNK_STATIC  -> thunkClosure ThunkClosure
-            THUNK_SELECTOR-> ptr1Closure SelectorClosure
+            THUNK_SELECTOR-> selectorClosure
             AP            -> papClosure APClosure
             PAP           -> papClosure PAPClosure
             AP_STACK      -> apStackClosure
@@ -138,6 +138,10 @@ startDebugger args handleEvent =
         thunkClosure con = do
           (ps,ws) <- peekContent itbl pclosure
           return (con itbl ps ws)
+
+        selectorClosure = do
+          ([_,p],[]) <- peekContent itbl{ptrs=2} pclosure
+          return (SelectorClosure itbl p)
 
         ptr1Closure con = do
           ([p],[]) <- peekContent itbl pclosure

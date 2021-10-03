@@ -10,7 +10,7 @@ typedef struct {
     void (*register_info)(const char* name, GElf_Addr addr, uint8_t save_byte,
                           StgInfoTable *infoTable);
     int (*breakpoint_hit)(Debugger *debugger,
-                          GElf_Addr addr, void *closure, long *save_word);
+                          GElf_Addr addr, StgClosure *closure, uint8_t *save_byte);
 } DebuggerCallbacks;
 
 int debugger_execv(char *pathname, char *const argv[],

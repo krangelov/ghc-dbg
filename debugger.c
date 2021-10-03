@@ -19,7 +19,7 @@ struct Debugger {
 
 static
 int copy_infotable(Debugger *debugger,
-                    GElf_Addr addr, StgInfoTable *infoTable)
+                   GElf_Addr addr, StgInfoTable *infoTable)
 {
     int i = 0;
     while (i < sizeof(StgInfoTable) / sizeof(long)) {
@@ -46,21 +46,149 @@ int copy_infotable(Debugger *debugger,
     return 1;
 }
 
+static uint32_t
+debugger_closure_sizeW(Debugger *debugger,
+                       GElf_Addr addr, const StgInfoTable *infoTable)
+{
+    switch (infoTable->type) {
+    case FUN:
+    case CONSTR:
+    case THUNK_STATIC:
+    case IND_STATIC:
+    case BLOCKING_QUEUE:
+    case BLACKHOLE:
+    case MVAR_CLEAN:
+    case MVAR_DIRTY:
+    case MUT_VAR_CLEAN:
+    case MUT_VAR_DIRTY:
+    case WEAK:
+       return sizeofW(StgClosure)
+             + sizeofW(StgPtr)  * infoTable->layout.payload.ptrs
+             + sizeofW(StgWord) * infoTable->layout.payload.nptrs;
+    case THUNK_0_1:
+    case THUNK_1_0:
+        return sizeofW(StgThunk) + 1;
+    case FUN_0_1:
+    case CONSTR_0_1:
+    case FUN_1_0:
+    case CONSTR_1_0:
+        return sizeofW(StgHeader) + 1;
+    case THUNK_0_2:
+    case THUNK_1_1:
+    case THUNK_2_0:
+        return sizeofW(StgThunk) + 2;
+    case FUN_0_2:
+    case CONSTR_0_2:
+    case FUN_1_1:
+    case CONSTR_1_1:
+    case FUN_2_0:
+    case CONSTR_2_0:
+        return sizeofW(StgHeader) + 2;
+    case THUNK:
+        return sizeofW(StgThunk)
+             + sizeofW(StgPtr)  * infoTable->layout.payload.ptrs
+             + sizeofW(StgWord) * infoTable->layout.payload.nptrs;
+    case THUNK_SELECTOR:
+        return sizeofW(StgSelector);
+    case AP_STACK: {
+        long size =
+            ptrace(PTRACE_PEEKDATA,
+                   debugger->child,
+                   addr+offsetof(StgAP_STACK,size),
+                   NULL);
+        return sizeofW(StgAP_STACK) + size;
+    }
+    case AP: {
+        StgHalfWord hws[2];
+        *((long *)hws) =
+            ptrace(PTRACE_PEEKDATA,
+                   debugger->child,
+                   addr+offsetof(StgAP,arity),
+                   NULL);
+        return sizeofW(StgAP) + hws[1];
+    }
+    case PAP: {
+        StgHalfWord hws[2];
+        *((long *)hws) =
+            ptrace(PTRACE_PEEKDATA,
+                   debugger->child,
+                   addr+offsetof(StgPAP,arity),
+                   NULL);
+        return sizeofW(StgPAP) + hws[1];
+    }
+    case IND:
+        return sizeofW(StgInd);
+    case ARR_WORDS: {
+        long bytes =
+            ptrace(PTRACE_PEEKDATA,
+                   debugger->child,
+                   addr+offsetof(StgArrBytes,bytes),
+                   NULL);
+        return sizeofW(StgArrBytes) + ROUNDUP_BYTES_TO_WDS(bytes);
+    }
+    case MUT_ARR_PTRS_CLEAN:
+    case MUT_ARR_PTRS_DIRTY:
+    case MUT_ARR_PTRS_FROZEN_CLEAN:
+    case MUT_ARR_PTRS_FROZEN_DIRTY: {
+        long size =
+            ptrace(PTRACE_PEEKDATA,
+                   debugger->child,
+                   addr+offsetof(StgMutArrPtrs,size),
+                   NULL);
+        return sizeofW(StgMutArrPtrs) + size;
+    }
+    case SMALL_MUT_ARR_PTRS_CLEAN:
+    case SMALL_MUT_ARR_PTRS_DIRTY:
+    case SMALL_MUT_ARR_PTRS_FROZEN_CLEAN:
+    case SMALL_MUT_ARR_PTRS_FROZEN_DIRTY: {
+        long ptrs =
+            ptrace(PTRACE_PEEKDATA,
+                   debugger->child,
+                   addr+offsetof(StgSmallMutArrPtrs,ptrs),
+                   NULL);
+        return sizeofW(StgSmallMutArrPtrs) + ptrs;
+    }
+    case TSO:
+        return sizeofW(StgTSO);
+    case STACK: {
+        long stack_size =
+            ptrace(PTRACE_PEEKDATA,
+                   debugger->child,
+                   addr+offsetof(StgStack,stack_size),
+                   NULL);
+        return sizeofW(StgStack) + stack_size;
+    }
+    case BCO: {
+        StgHalfWord hws[2];
+        *((long *)hws) =
+            ptrace(PTRACE_PEEKDATA,
+                   debugger->child,
+                   addr+offsetof(StgBCO,arity),
+                   NULL);
+        return sizeofW(StgBCO) + hws[1];
+    }
+    case TREC_CHUNK:
+        return sizeofW(StgTRecChunk);
+    default:
+        return 0;
+    }
+}
+
 static
 StgClosure *copy_closure(Debugger *debugger,
                          GElf_Addr addr, StgInfoTable *infoTable)
 {
-    int size =
-        sizeof(StgHeader) +
-        (infoTable->layout.payload.ptrs +
-         infoTable->layout.payload.nptrs) * sizeof(StgWord);
-    int count = size / sizeof(long);
+    int size  = debugger_closure_sizeW(debugger, addr, infoTable)
+                  * sizeof(StgWord);
+    if (size == 0)
+        return NULL;
 
     StgClosure *closure = malloc(size);
     if (!closure)
         return NULL;
 
     int i = 0;
+    int count = size / sizeof(long);    
     while (i < count) {
         ((long *) closure)[i] =
             ptrace(PTRACE_PEEKDATA,
@@ -202,52 +330,8 @@ int debugger_execv(char *pathname, char *const argv[],
                     exit(1);
                 }
 
-                void *closure = NULL;
-                if (infoTable.type == CONSTR ||
-                    infoTable.type == CONSTR_1_0 ||
-                    infoTable.type == CONSTR_0_1 ||
-                    infoTable.type == CONSTR_2_0 ||
-                    infoTable.type == CONSTR_1_1 ||
-                    infoTable.type == CONSTR_0_2 ||
-                    infoTable.type == FUN ||
-                    infoTable.type == FUN_1_0 ||
-                    infoTable.type == FUN_0_1 ||
-                    infoTable.type == FUN_2_0 ||
-                    infoTable.type == FUN_1_1 ||
-                    infoTable.type == FUN_0_2 ||
-                    infoTable.type == THUNK ||
-                    infoTable.type == THUNK_1_0 ||
-                    infoTable.type == THUNK_0_1 ||
-                    infoTable.type == THUNK_2_0 ||
-                    infoTable.type == THUNK_1_1 ||
-                    infoTable.type == THUNK_0_2 ||
-                    infoTable.type == THUNK_STATIC ||
-                    infoTable.type == THUNK_SELECTOR ||
-                    infoTable.type == AP ||
-                    infoTable.type == PAP ||
-                    infoTable.type == AP_STACK ||
-                    infoTable.type == IND ||
-                    infoTable.type == IND_STATIC ||
-                    infoTable.type == BLOCKING_QUEUE ||
-                    infoTable.type == BLACKHOLE ||
-                    infoTable.type == MVAR_CLEAN ||
-                    infoTable.type == MVAR_DIRTY ||
-                    infoTable.type == ARR_WORDS ||
-                    infoTable.type == MUT_ARR_PTRS_CLEAN ||
-                    infoTable.type == MUT_ARR_PTRS_DIRTY || 
-                    infoTable.type == MUT_ARR_PTRS_FROZEN_DIRTY ||
-                    infoTable.type == MUT_ARR_PTRS_FROZEN_CLEAN ||
-                    infoTable.type == MUT_VAR_CLEAN ||
-                    infoTable.type == MUT_VAR_DIRTY ||
-                    infoTable.type == WEAK ||
-                    infoTable.type == SMALL_MUT_ARR_PTRS_CLEAN ||
-                    infoTable.type == SMALL_MUT_ARR_PTRS_DIRTY || 
-                    infoTable.type == SMALL_MUT_ARR_PTRS_FROZEN_DIRTY ||
-                    infoTable.type == SMALL_MUT_ARR_PTRS_FROZEN_CLEAN) {
-
-                    GElf_Addr addr = (GElf_Addr) (regs.rbx & ~TAG_MASK);
-                    closure = copy_closure(&debugger, addr, &infoTable);
-                }
+                GElf_Addr addr = (GElf_Addr) (regs.rbx & ~TAG_MASK);
+                StgClosure *closure = copy_closure(&debugger, addr, &infoTable);
 
                 uint8_t save_byte;
                 if (debugger.callbacks->breakpoint_hit(&debugger, regs.rip, closure, &save_byte)) {
@@ -293,5 +377,10 @@ StgClosure *debugger_copy_closure(Debugger *debugger, GElf_Addr addr)
     if (!copy_infotable(debugger, infoTable_addr - sizeof(StgInfoTable), &infoTable))
         return NULL;
 
-    return copy_closure(debugger, addr, &infoTable);
+    StgClosure *closure = copy_closure(debugger, addr, &infoTable);
+    if (closure == NULL) {
+        closure = malloc(sizeof(StgClosure));
+        closure->header.info = (StgInfoTable *)infoTable_addr;
+    }
+    return closure;
 }
