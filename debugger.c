@@ -18,7 +18,7 @@ struct Debugger {
 };
 
 static
-void copy_infotable(Debugger *debugger,
+int copy_infotable(Debugger *debugger,
                     GElf_Addr addr, StgInfoTable *infoTable)
 {
     int i = 0;
@@ -28,6 +28,8 @@ void copy_infotable(Debugger *debugger,
                    debugger->child,
                    addr + i * sizeof(long),
                    NULL);
+        if (errno != 0)
+            return 0;
         i++;
     }
     int j = sizeof(StgInfoTable) % sizeof(long);
@@ -37,8 +39,11 @@ void copy_infotable(Debugger *debugger,
                    debugger->child,
                    addr + i * sizeof(long),
                    NULL);
+        if (errno != 0)
+            return 0;
         memcpy(((long *) infoTable)+i, &val, j);
     }
+    return 1;
 }
 
 static
@@ -62,6 +67,11 @@ StgClosure *copy_closure(Debugger *debugger,
                    debugger->child,
                    addr + i * sizeof(long),
                    NULL);
+        if (errno != 0) {
+            free(closure);
+            perror("copy_closure");
+            return NULL;
+        }
         i++;
     }
     int j = size % sizeof(long);
@@ -71,6 +81,11 @@ StgClosure *copy_closure(Debugger *debugger,
                    debugger->child,
                    addr + i * sizeof(long),
                    NULL);
+        if (errno != 0) {
+            free(closure);
+            perror("copy_closure");
+            return NULL;
+        }
         memcpy(((long *) closure)+i, &val, j);
     }
 
@@ -110,7 +125,8 @@ int collect_infos(Dwfl_Module *mod, void ** x,
             ptrace(PTRACE_POKEDATA, debugger->child, addr, *((void**) &int3_buf));
 
             StgInfoTable infoTable;
-            copy_infotable(debugger, addr - sizeof(StgInfoTable), &infoTable);
+            if (!copy_infotable(debugger, addr - sizeof(StgInfoTable), &infoTable))
+                return DWARF_CB_ABORT;
 
             debugger->callbacks->register_info(name,addr,save_byte,&infoTable);
         }
@@ -131,15 +147,21 @@ int debugger_execv(char *pathname, char *const argv[],
         ptrace(PTRACE_TRACEME, 0, NULL, NULL);
         execv(pathname, argv);
     } else {
-        int initilized = 0;
+        int state = 0;
 
         while(1) {
             int status;
-            wait(&status);
+            if (waitpid(debugger.child, &status, 0) < 0) {
+                perror("waitpid");
+                break;
+            }
             if(WIFEXITED(status))
                 break;
 
-            if (!initilized) {
+            struct user_regs_struct regs;
+            uint8_t int3_buf[sizeof(long)];
+
+            if (state == 0) {
                 static char *debuginfo_path;
                 static const Dwfl_Callbacks proc_callbacks =
                 {
@@ -167,16 +189,18 @@ int debugger_execv(char *pathname, char *const argv[],
 
                 dwfl_getmodules(debugger.dwfl, collect_infos, &debugger, 0);
 
-                initilized = 1;
+                state = 1;
 
                 ptrace(PTRACE_CONT, debugger.child, NULL, NULL);
-            } else {
-                struct user_regs_struct regs;
+            } else if (state == 1) {
                 ptrace(PTRACE_GETREGS, debugger.child, NULL, &regs);
                 regs.rip--;
 
                 StgInfoTable infoTable;
-                copy_infotable(&debugger, regs.rip - sizeof(StgInfoTable), &infoTable);
+                if (!copy_infotable(&debugger, regs.rip - sizeof(StgInfoTable), &infoTable)) {
+                    perror("copy_infotable");
+                    exit(1);
+                }
 
                 void *closure = NULL;
                 if (infoTable.type == CONSTR ||
@@ -227,8 +251,6 @@ int debugger_execv(char *pathname, char *const argv[],
 
                 uint8_t save_byte;
                 if (debugger.callbacks->breakpoint_hit(&debugger, regs.rip, closure, &save_byte)) {
-                    uint8_t int3_buf[sizeof(long)];
-
                     *((long*) &int3_buf) =
                         ptrace(PTRACE_PEEKDATA, debugger.child, regs.rip, NULL);
                     int3_buf[0] = save_byte;
@@ -237,16 +259,21 @@ int debugger_execv(char *pathname, char *const argv[],
                     ptrace(PTRACE_SETREGS, debugger.child, NULL, &regs);
                     ptrace(PTRACE_SINGLESTEP, debugger.child, NULL, NULL);
 
-                    *((long*) &int3_buf) =
-                        ptrace(PTRACE_PEEKDATA, debugger.child, regs.rip, NULL);
-                    int3_buf[0] = 0xCC;
-                    ptrace(PTRACE_POKEDATA, debugger.child, regs.rip, *((void**) &int3_buf));
+                    state = 2;
+                } else {
+                    ptrace(PTRACE_CONT, debugger.child, NULL, NULL);
                 }
 
                 if (closure != NULL)
                     free(closure);
-
+            } else if (state == 2) {
+                *((long*) &int3_buf) =
+                    ptrace(PTRACE_PEEKDATA, debugger.child, regs.rip, NULL);
+                int3_buf[0] = 0xCC;
+                ptrace(PTRACE_POKEDATA, debugger.child, regs.rip, *((void**) &int3_buf));
                 ptrace(PTRACE_CONT, debugger.child, NULL, NULL);
+
+                state = 1;
             }
         }
 
@@ -263,7 +290,8 @@ StgClosure *debugger_copy_closure(Debugger *debugger, GElf_Addr addr)
         ptrace(PTRACE_PEEKDATA, debugger->child, addr, NULL);
 
     StgInfoTable infoTable;
-    copy_infotable(debugger, infoTable_addr - sizeof(StgInfoTable), &infoTable);
+    if (!copy_infotable(debugger, infoTable_addr - sizeof(StgInfoTable), &infoTable))
+        return NULL;
 
     return copy_closure(debugger, addr, &infoTable);
 }
