@@ -71,7 +71,11 @@ startDebugger args handleEvent =
           case tipe itbl of
             CONSTR        -> constrClosure 
             CONSTR_1_0    -> constrClosure
-            CONSTR_0_1    -> constrClosure
+            CONSTR_0_1
+              | name == "ghczmprim_GHCziTypes_Izh_con_info" -> do
+                             ([],[w]) <- peekContent itbl pclosure
+                             return (IntClosure PInt (fromIntegral w))
+              | otherwise -> constrClosure
             CONSTR_2_0    -> constrClosure
             CONSTR_1_1    -> constrClosure
             CONSTR_0_2    -> constrClosure

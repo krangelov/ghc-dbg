@@ -8,9 +8,10 @@ main = do
   args <- getArgs
   startDebugger args $ \dbg name closure -> do
     putStrLn (name++":  "++show closure)
-    case tipe (info closure) of
-      CONSTR -> forM_ (ptrArgs closure) $ \arg -> do
-                   clo <- peekClosure dbg arg
-                   putStrLn (">>> "++show clo)
+    case closure of
+      ConstrClosure{}
+          -> forM_ (ptrArgs closure) $ \arg -> do
+                clo <- peekClosure dbg arg
+                putStrLn (">>> "++show clo)
       _   -> return ()
        
