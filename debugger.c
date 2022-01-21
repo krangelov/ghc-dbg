@@ -405,7 +405,13 @@ int debugger_execv(char *pathname, char *const argv[],
                 state = 1;
 
                 ptrace(PTRACE_CONT, debugger.child, NULL, NULL);
-            } else if (state == 1) {
+            } else if (state == 1 || state == 2) {
+
+                if (WIFSTOPPED(status) && WSTOPSIG(status) != SIGTRAP) {
+                    ptrace(PTRACE_CONT, debugger.child, NULL, NULL);
+                    continue;
+                }
+
                 ptrace(PTRACE_GETREGS, debugger.child, NULL, &regs);
                 regs.rip--;
 
@@ -419,7 +425,7 @@ int debugger_execv(char *pathname, char *const argv[],
                 StgClosure *closure = copy_closure(&debugger, addr, &infoTable);
 
                 uint8_t save_byte;
-                if (debugger.callbacks->breakpoint_hit(&debugger, regs.rip, closure, &save_byte)) {
+                if (state == 2 || debugger.callbacks->breakpoint_hit(&debugger, regs.rip, closure, &save_byte)) {
                     *((long*) &int3_buf) =
                         ptrace(PTRACE_PEEKDATA, debugger.child, regs.rip, NULL);
                     int3_buf[0] = save_byte;
@@ -428,14 +434,14 @@ int debugger_execv(char *pathname, char *const argv[],
                     ptrace(PTRACE_SETREGS, debugger.child, NULL, &regs);
                     ptrace(PTRACE_SINGLESTEP, debugger.child, NULL, NULL);
 
-                    state = 2;
+                    state = 3;
                 } else {
                     ptrace(PTRACE_CONT, debugger.child, NULL, NULL);
                 }
 
                 if (closure != NULL)
                     free(closure);
-            } else if (state == 2) {
+            } else if (state == 3) {
                 *((long*) &int3_buf) =
                     ptrace(PTRACE_PEEKDATA, debugger.child, regs.rip, NULL);
                 int3_buf[0] = 0xCC;
@@ -443,6 +449,9 @@ int debugger_execv(char *pathname, char *const argv[],
                 ptrace(PTRACE_CONT, debugger.child, NULL, NULL);
 
                 state = 1;
+                if (WIFSTOPPED(status) && WSTOPSIG(status) != SIGTRAP) {
+                    state = 2;
+                }
             }
         }
 
