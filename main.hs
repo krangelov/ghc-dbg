@@ -6,8 +6,11 @@ import HDB
 
 main = do
   args <- getArgs
-  startDebugger args $ \dbg name closure -> do
+  startDebugger args $ \dbg name srcloc closure -> do
     putStrLn (name++":  "++show closure)
+    case srcloc of
+      Just (fpath,spans) -> putStrLn (fpath++"  "++show spans)
+      Nothing            -> return ()
     case closure of
       ConstrClosure{}
           -> forM_ (ptrArgs closure) $ \arg -> do

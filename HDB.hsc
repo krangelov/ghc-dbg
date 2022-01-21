@@ -17,7 +17,9 @@ data Debugger
       peekClosure :: HeapPtr -> IO (Maybe (String,GenClosure HeapPtr))
     }
 
-startDebugger :: [String] -> (Debugger -> String -> GenClosure HeapPtr -> IO ()) -> IO ()
+type SourceSpans = (FilePath,[(Int,Int,Int,Int)])
+
+startDebugger :: [String] -> (Debugger -> String -> Maybe SourceSpans -> GenClosure HeapPtr -> IO ()) -> IO ()
 startDebugger args handleEvent =
   withArgs args $ \c_prog_args@(c_prog:_) ->
   withArray0 nullPtr c_prog_args $ \c_prog_args ->
@@ -32,34 +34,92 @@ startDebugger args handleEvent =
 
     withCallbacks :: (Ptr DebuggerCallbacks -> IO a) -> IO a
     withCallbacks fn = do
-      ref <- newIORef Map.empty
-      (bracket (wrapRegisterInfo (register_info ref)) freeHaskellFunPtr $ \c_register_info ->
+      ref <- newIORef ("",[],Map.empty,Map.empty)
+      (bracket (wrapRegisterCompUnit (register_comp_unit ref)) freeHaskellFunPtr $ \c_register_comp_unit ->
+       bracket (wrapRegisterSubProg (register_subprog ref)) freeHaskellFunPtr $ \c_register_subprog ->
+       bracket (wrapRegisterScope (register_scope ref)) freeHaskellFunPtr $ \c_register_scope ->
+       bracket (wrapRegisterInfo (register_info ref)) freeHaskellFunPtr $ \c_register_info ->
        bracket (wrapBreakpointHit (breakpoint_hit ref)) freeHaskellFunPtr $ \c_breakpoint_hit ->
        allocaBytes (#size DebuggerCallbacks) $ \c_callbacks -> do
+         (#poke DebuggerCallbacks, register_comp_unit) c_callbacks c_register_comp_unit
+         (#poke DebuggerCallbacks, register_subprog) c_callbacks c_register_subprog
+         (#poke DebuggerCallbacks, register_scope) c_callbacks c_register_scope
          (#poke DebuggerCallbacks, register_info) c_callbacks c_register_info
          (#poke DebuggerCallbacks, breakpoint_hit) c_callbacks c_breakpoint_hit
          fn c_callbacks)
       where
+        register_comp_unit ref c_comp_dir c_fname = do
+          comp_dir <- if c_comp_dir == nullPtr
+                        then return ""
+                        else peekCString c_comp_dir
+          fname    <- if c_fname == nullPtr
+                        then return ""
+                        else peekCString c_fname
+          (cu,ss,dies,breakpoints) <- readIORef ref
+          writeIORef ref (comp_dir++fname,[],dies,breakpoints)
+
+        register_subprog ref c_name = do
+          name <- if c_name == nullPtr
+                    then return ""
+                    else peekCString c_name
+          (cu,ss,dies,breakpoints) <- readIORef ref
+          writeIORef ref (cu,[],Map.insert name (cu,ss) dies,breakpoints)
+
+        register_scope ref c_start_line c_start_col c_end_line c_end_col = do
+          (cu,ss,dies,breakpoints) <- readIORef ref
+          let s = (fromIntegral c_start_line
+                  ,fromIntegral c_start_col
+                  ,fromIntegral c_end_line
+                  ,fromIntegral c_end_col
+                  )
+          writeIORef ref (cu,add_scope s ss,dies,breakpoints)
+
         register_info ref c_name addr save_byte c_infoTable = do
           name <- peekCString c_name
           itbl <- peekItbl c_infoTable
-          breakpoints <- readIORef ref
-          writeIORef ref $! Map.insert addr (name,save_byte,itbl) breakpoints
+          (cu,ss,dies,breakpoints) <- readIORef ref
+          writeIORef ref $! (cu,ss,dies,Map.insert addr (name,save_byte,itbl) breakpoints)
 
         breakpoint_hit ref dbg addr pclosure p_save_byte = do
-          breakpoints <- readIORef ref
+          (cu,ss,dies,breakpoints) <- readIORef ref
           case Map.lookup addr breakpoints of
             Just (name,save_byte,itbl) -> do poke p_save_byte save_byte
-                                             mb_closure <- peekClosure name itbl pclosure        
-                                             handleEvent (wrapDebugger ref dbg) name mb_closure
+                                             mb_closure <- peekClosure name itbl pclosure
+                                             let die = Map.lookup name dies
+                                             handleEvent (wrapDebugger ref dbg) name die mb_closure
                                              return 1
             Nothing                    -> do return 0
+
+        add_scope s []      = [s]
+        add_scope s (s':ss) =
+          case cmp s s' of
+            Just LT -> s':ss
+            Just EQ -> s :ss
+            Just GT -> s :remove_scope s ss
+            Nothing -> add_scope s ss
+
+        remove_scope s []      = []
+        remove_scope s (s':ss) =
+          case cmp s s' of
+            Just GT -> remove_scope s ss
+            _       -> s':remove_scope s ss
+
+        cmp (sl1,sc1,el1,ec1) (sl2,sc2,el2,ec2) =
+          case (compare (sl1,sc1) (sl2,sc2),compare (el1,ec1) (el2,ec2)) of
+            (LT,GT) -> Just GT
+            (EQ,GT) -> Just GT
+            (LT,EQ) -> Just GT
+            (EQ,EQ) -> Just EQ
+            (GT,EQ) -> Just LT
+            (EQ,LT) -> Just LT
+            (GT,LT) -> Just LT
+            _       -> Nothing
 
     wrapDebugger ref dbg = Debugger peek
       where
         peek addr =
           bracket (debugger_copy_closure dbg addr) free $ \pclosure -> do
-            breakpoints <- readIORef ref
+            (cu,ss,dies,breakpoints) <- readIORef ref
             info_ptr <- (#peek StgClosure, header.info) pclosure
             case Map.lookup info_ptr breakpoints of
               Nothing            -> return Nothing
@@ -198,13 +258,10 @@ foreign import ccall debugger_execv :: CString -> Ptr CString ->
 
 foreign import ccall debugger_copy_closure :: Ptr Debugger -> HeapPtr -> IO (Ptr ())
 
-type RegisterInfo = CString -> (#type GElf_Addr) -> (#type uint8_t) -> Ptr StgInfoTable -> IO ()
+type Wrapper a = a -> IO (FunPtr a)
 
-foreign import ccall "wrapper"
-  wrapRegisterInfo :: RegisterInfo -> IO (FunPtr RegisterInfo)
-
-type BreakpointHit = Ptr Debugger -> (#type GElf_Addr) -> Ptr () -> Ptr (#type uint8_t) -> IO CInt
-
-foreign import ccall "wrapper"
-  wrapBreakpointHit :: BreakpointHit -> IO (FunPtr BreakpointHit)
-
+foreign import ccall "wrapper" wrapRegisterCompUnit :: Wrapper (CString -> CString -> IO ())
+foreign import ccall "wrapper" wrapRegisterSubProg :: Wrapper (CString -> IO ())
+foreign import ccall "wrapper" wrapRegisterScope :: Wrapper (CInt -> CInt -> CInt -> CInt -> IO ())
+foreign import ccall "wrapper" wrapRegisterInfo :: Wrapper (CString -> (#type GElf_Addr) -> (#type uint8_t) -> Ptr StgInfoTable -> IO ())
+foreign import ccall "wrapper" wrapBreakpointHit :: Wrapper (Ptr Debugger -> (#type GElf_Addr) -> Ptr () -> Ptr (#type uint8_t) -> IO CInt)

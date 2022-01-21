@@ -11,6 +11,22 @@
 #include <elfutils/libdwfl.h>
 #include "debugger.h"
 
+#define DW_TAG_subprogram 0x2e
+#define DW_TAG_lexical_block 0x0b
+#define DW_TAG_ghc_src_note 0x5b00
+
+#define DW_AT_name 0x03
+#define DW_AT_language 0x13
+#define DW_AT_comp_dir 0x1b
+#define DW_AT_MIPS_linkage_name 0x2007
+#define DW_AT_ghc_span_file 0x2b00
+#define DW_AT_ghc_span_start_line 0x2b01
+#define DW_AT_ghc_span_start_col 0x2b02
+#define DW_AT_ghc_span_end_line 0x2b03
+#define DW_AT_ghc_span_end_col 0x2b04
+
+#define DW_LANG_Haskell 0x18
+
 struct Debugger {
     pid_t child;
     DebuggerCallbacks *callbacks;
@@ -227,18 +243,87 @@ int collect_infos(Dwfl_Module *mod, void ** x,
 {
     Debugger *debugger = (Debugger *) arg;
 
+
+    Dwarf_Addr bias;
+    Dwarf_Die *cu = NULL;
+    for (;;) {
+        cu = dwfl_module_nextcu(mod, cu, &bias);
+        if (cu == NULL)
+            break;
+
+        Dwarf_Attribute attr;
+        if (dwarf_attr(cu, DW_AT_language, &attr) != NULL &&
+            *attr.valp == DW_LANG_Haskell) {
+
+            const char *comp_dir = NULL;
+            if (dwarf_attr(cu, DW_AT_comp_dir, &attr) != NULL) {
+                comp_dir = attr.valp;
+            }
+            const char *fname = NULL;
+            if (dwarf_attr(cu, DW_AT_name, &attr) != NULL) {
+                fname = attr.valp;
+            }
+            debugger->callbacks->register_comp_unit(comp_dir,fname);
+
+            Dwarf_Die subprog;
+            int res = dwarf_child(cu, &subprog);
+            while (res == 0) {
+                if (dwarf_tag(&subprog) == DW_TAG_subprogram) {
+                    const char *fun_name = NULL;
+                    if (dwarf_attr(&subprog, DW_AT_MIPS_linkage_name, &attr) != NULL) {
+                         fun_name = attr.valp;
+                    }
+
+                    Dwarf_Die lexblock;
+                    int res = dwarf_child(&subprog, &lexblock);
+                    while (res == 0) {
+                        if (dwarf_tag(&lexblock) == DW_TAG_lexical_block) {
+                            Dwarf_Die node;
+                            int res = dwarf_child(&lexblock, &node);
+                            while (res == 0) {
+                                if (dwarf_tag(&node) == DW_TAG_ghc_src_note) {
+                                    int start_line = 0, start_col = 0;
+                                    int end_line = 0,   end_col = 0;
+
+                                    if (dwarf_attr(&node, DW_AT_ghc_span_start_line, &attr) != NULL) {
+                                        start_line = *((int*) attr.valp);
+                                    }
+                                    if (dwarf_attr(&node, DW_AT_ghc_span_start_col, &attr) != NULL) {
+                                        start_col = *((char*) attr.valp);
+                                    }
+                                    if (dwarf_attr(&node, DW_AT_ghc_span_end_line, &attr) != NULL) {
+                                        end_line = *((int*) attr.valp);
+                                    }
+                                    if (dwarf_attr(&node, DW_AT_ghc_span_end_col, &attr) != NULL) {
+                                        end_col = *((char*) attr.valp);
+                                    }
+
+                                    debugger->callbacks->register_scope(start_line,start_col,end_line,end_col);
+                                }
+                                res = dwarf_siblingof(&node, &node);
+                            }
+                        }
+                        res = dwarf_siblingof(&lexblock, &lexblock);
+                    }
+
+                    debugger->callbacks->register_subprog(fun_name);
+                }
+                res = dwarf_siblingof(&subprog, &subprog);
+            }
+        }
+    }
+
     int n_sym = dwfl_module_getsymtab(mod);
     for (int i = 0; i < n_sym; i++) {
         GElf_Sym sym;
         GElf_Word shndx;
         GElf_Addr addr;
         Elf *elf;
-        Dwarf_Addr bias;
         
         const char *name =
             dwfl_module_getsym_info(mod, i, &sym, &addr,
-					    &shndx,
-					    &elf, &bias);
+                                    &shndx,
+                                    &elf, &bias);
 
         size_t len = strlen(name);
         if (len > 5 && strcmp(name+len-5, "_info") == 0 &&

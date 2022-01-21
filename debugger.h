@@ -7,6 +7,9 @@
 typedef struct Debugger Debugger;
 
 typedef struct {
+    void (*register_comp_unit)(const char* comp_dir, const char* fname);
+    void (*register_subprog)(const char* name);
+    void (*register_scope)(int start_line,int start_col,int end_line,int end_col);
     void (*register_info)(const char* name, GElf_Addr addr, uint8_t save_byte,
                           StgInfoTable *infoTable);
     int (*breakpoint_hit)(Debugger *debugger,
