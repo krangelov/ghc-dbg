@@ -119,12 +119,14 @@ startDebugger args handleEvent =
       where
         peek addr =
           bracket (debugger_copy_closure dbg addr) free $ \pclosure -> do
-            (cu,ss,dies,breakpoints) <- readIORef ref
-            info_ptr <- (#peek StgClosure, header.info) pclosure
-            case Map.lookup info_ptr breakpoints of
-              Nothing            -> return Nothing
-              Just (name,_,itbl) -> do clo <- peekClosure name itbl pclosure
-                                       return (Just (name,clo))
+            if pclosure == nullPtr
+              then return Nothing
+              else do (cu,ss,dies,breakpoints) <- readIORef ref
+                      info_ptr <- (#peek StgClosure, header.info) pclosure
+                      case Map.lookup info_ptr breakpoints of
+                        Nothing            -> return Nothing
+                        Just (name,_,itbl) -> do clo <- peekClosure name itbl pclosure
+                                                 return (Just (name,clo))
 
     peekClosure name itbl pclosure
       | pclosure /= nullPtr =
