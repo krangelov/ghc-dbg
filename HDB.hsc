@@ -19,7 +19,7 @@ data Debugger
 
 type SourceSpans = (FilePath,[(Int,Int,Int,Int)])
 
-startDebugger :: [String] -> (Debugger -> String -> Maybe SourceSpans -> GenClosure HeapPtr -> IO ()) -> IO ()
+startDebugger :: [String] -> (Debugger -> String -> Maybe SourceSpans -> [HeapPtr] -> IO ()) -> IO ()
 startDebugger args handleEvent =
   withArgs args $ \c_prog_args@(c_prog:_) ->
   withArray0 nullPtr c_prog_args $ \c_prog_args ->
@@ -80,13 +80,13 @@ startDebugger args handleEvent =
           (cu,ss,dies,breakpoints) <- readIORef ref
           writeIORef ref $! (cu,ss,dies,Map.insert addr (name,save_byte,itbl) breakpoints)
 
-        breakpoint_hit ref dbg addr pclosure p_save_byte = do
+        breakpoint_hit ref dbg addr n_args args p_save_byte = do
           (cu,ss,dies,breakpoints) <- readIORef ref
           case Map.lookup addr breakpoints of
             Just (name,save_byte,itbl) -> do poke p_save_byte save_byte
-                                             mb_closure <- peekClosure name itbl pclosure
+                                             args <- peekArray (fromIntegral n_args) args
                                              let die = Map.lookup name dies
-                                             handleEvent (wrapDebugger ref dbg) name die mb_closure
+                                             handleEvent (wrapDebugger ref dbg) name die args
                                              return 1
             Nothing                    -> do return 0
 
@@ -271,4 +271,4 @@ foreign import ccall "wrapper" wrapRegisterCompUnit :: Wrapper (CString -> CStri
 foreign import ccall "wrapper" wrapRegisterSubProg :: Wrapper (CString -> IO ())
 foreign import ccall "wrapper" wrapRegisterScope :: Wrapper (CInt -> CInt -> CInt -> CInt -> IO ())
 foreign import ccall "wrapper" wrapRegisterInfo :: Wrapper (CString -> (#type GElf_Addr) -> (#type uint8_t) -> Ptr StgInfoTable -> IO ())
-foreign import ccall "wrapper" wrapBreakpointHit :: Wrapper (Ptr Debugger -> (#type GElf_Addr) -> Ptr () -> Ptr (#type uint8_t) -> IO CInt)
+foreign import ccall "wrapper" wrapBreakpointHit :: Wrapper (Ptr Debugger -> (#type GElf_Addr) -> CSize -> Ptr (#type StgWord) -> Ptr (#type uint8_t) -> IO CInt)
