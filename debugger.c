@@ -189,6 +189,9 @@ StgWord *get_args(Debugger *debugger,
     case RET_BIG:
     case RET_FUN:
     case UPDATE_FRAME:
+    case IND:
+    case IND_STATIC:
+    case BLACKHOLE:
         n_args = 1;
         break;
     default:
