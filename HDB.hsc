@@ -208,10 +208,17 @@ startDebugger args handleEvent =
           return (con itbl p)
 
         papClosure con = do
-          (p:ps,[w]) <- peekContent itbl pclosure
-          let arity  = fromIntegral (w .&. 0xFFFFFFFF)
-          let n_args = fromIntegral ((w `shiftR` 32) .&. 0xFFFFFFFF)
-          return (con itbl arity n_args p ps)
+          arity  <- (#peek StgPAP, arity) pclosure
+          n_args <- (#peek StgPAP, n_args) pclosure
+          fun    <- (#peek StgPAP, fun) pclosure
+          ps     <- peekArray (fromIntegral n_args)
+                              (plusPtr (castPtr pclosure)
+                                       (#offset StgPAP, payload))
+          return (con itbl
+                      (fromIntegral (arity  :: (#type StgHalfWord)))
+                      (fromIntegral (n_args :: (#type StgHalfWord)))
+                      (fun :: HeapPtr)
+                      (ps  :: [HeapPtr]))
 
         apStackClosure = do
           (p:ps,[]) <- peekContent itbl pclosure

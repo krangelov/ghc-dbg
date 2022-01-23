@@ -27,6 +27,14 @@
 
 #define DW_LANG_Haskell 0x18
 
+union StgMaxInfoTable {
+  StgFunInfoTable fun;
+  StgRetInfoTable ret;
+  StgConInfoTable con;
+};
+
+#define INFO_TABLE_MAX_SIZE sizeof(union StgMaxInfoTable)
+
 struct Debugger {
     pid_t child;
     DebuggerCallbacks *callbacks;
@@ -34,32 +42,161 @@ struct Debugger {
 };
 
 static
-int copy_infotable(Debugger *debugger,
-                   GElf_Addr addr, StgInfoTable *infoTable)
+StgInfoTable *copy_infotable(Debugger *debugger,
+                             GElf_Addr addr, char *buf)
 {
+    long *p = (long *) (buf + INFO_TABLE_MAX_SIZE);
+
+    size_t sz = sizeof(StgInfoTable);
+
     int i = 0;
-    while (i < sizeof(StgInfoTable) / sizeof(long)) {
-        ((long *) infoTable)[i] =
+    while (i < sz / sizeof(long)) {
+        i++;
+
+        *(p - i) =
             ptrace(PTRACE_PEEKDATA,
                    debugger->child,
-                   addr + i * sizeof(long),
+                   addr - i * sizeof(long),
                    NULL);
         if (errno != 0)
-            return 0;
-        i++;
+            return NULL;
     }
-    int j = sizeof(StgInfoTable) % sizeof(long);
+
+    StgInfoTable *infoTable =
+        (StgInfoTable *) (buf + INFO_TABLE_MAX_SIZE - sizeof(StgInfoTable));
+
+    switch (infoTable->type) {
+    case FUN:
+    case FUN_0_1:
+    case FUN_0_2:
+    case FUN_1_1:
+    case FUN_2_0:
+    case FUN_1_0:
+    case FUN_STATIC:
+        sz = sizeof(StgFunInfoTable);
+        break;
+    case RET_BCO:
+    case RET_SMALL:
+    case RET_BIG:
+    case RET_FUN:
+        sz = sizeof(StgRetInfoTable);
+        break;
+    case CONSTR:
+    case CONSTR_0_1:
+    case CONSTR_0_2:
+    case CONSTR_1_1:
+    case CONSTR_2_0:
+    case CONSTR_1_0:
+    case CONSTR_NOCAF:
+        sz = sizeof(StgFunInfoTable);
+        break;
+    }
+
+    while (i < sz / sizeof(long)) {
+        i++;
+
+        *(p - i) =
+            ptrace(PTRACE_PEEKDATA,
+                   debugger->child,
+                   addr - i * sizeof(long),
+                   NULL);
+        if (errno != 0)
+            return NULL;
+    }
+
+    int j = sz % sizeof(long);
     if (j != 0) {
         long val =
             ptrace(PTRACE_PEEKDATA,
                    debugger->child,
-                   addr + i * sizeof(long),
+                   addr - i * sizeof(long),
                    NULL);
         if (errno != 0)
-            return 0;
-        memcpy(((long *) infoTable)+i, &val, j);
+            return NULL;
+        memcpy(p-i, &val, j);
     }
-    return 1;
+    return infoTable;
+}
+
+static
+StgWord *get_args(Debugger *debugger,
+                  StgInfoTable *infoTable,
+                  struct user_regs_struct *regs,
+                  size_t *p_n_args)
+{
+    *p_n_args = 0;
+
+    int n_args = 0;
+    switch (infoTable->type) {
+    case FUN:
+    case FUN_0_1:
+    case FUN_0_2:
+    case FUN_1_1:
+    case FUN_2_0:
+    case FUN_1_0:
+    case FUN_STATIC: {
+        StgFunInfoTable *funInfoTable = (StgFunInfoTable *)
+            (((char *) infoTable) - offsetof(StgFunInfoTable,i));
+        n_args = funInfoTable->f.arity+1;
+        break;
+    }
+    case CONSTR:
+    case CONSTR_0_1:
+    case CONSTR_0_2:
+    case CONSTR_1_1:
+    case CONSTR_2_0:
+    case CONSTR_1_0:
+    case CONSTR_NOCAF:
+    case THUNK:
+    case THUNK_0_1:
+    case THUNK_0_2:
+    case THUNK_1_1:
+    case THUNK_2_0:
+    case THUNK_1_0:
+    case THUNK_STATIC:
+    case THUNK_SELECTOR:
+    case RET_BCO:
+    case RET_SMALL:
+    case RET_BIG:
+    case RET_FUN:
+    case UPDATE_FRAME:
+        n_args = 1;
+        break;
+    default:
+        return NULL;
+    }
+
+    *p_n_args = n_args;
+
+    StgWord *args = malloc(sizeof(StgWord)*n_args);
+    if (args == NULL)
+        return NULL;
+    StgWord *p = args;
+
+    if (n_args > 0) *(p++) = regs->rbx;
+	if (n_args > 1) *(p++) = regs->r14;
+	if (n_args > 2) *(p++) = regs->rsi;
+	if (n_args > 3) *(p++) = regs->rdi;
+	if (n_args > 4) *(p++) = regs->r8;
+    if (n_args > 5) *(p++) = regs->r9;
+    if (n_args > 6) {
+        size_t i = 6;
+        while (i < n_args) {
+            *(p++) =
+                ptrace(PTRACE_PEEKDATA,
+                       debugger->child,
+                       regs->rsp + (i-6) * sizeof(StgWord),
+                       NULL);
+            if (errno != 0) {
+                free(args);
+                return NULL;
+            }
+            i++;
+        }
+    }
+
+    *p_n_args = n_args;
+    return args;
 }
 
 static uint32_t
@@ -191,52 +328,6 @@ debugger_closure_sizeW(Debugger *debugger,
 }
 
 static
-StgClosure *copy_closure(Debugger *debugger,
-                         GElf_Addr addr, StgInfoTable *infoTable)
-{
-    int size  = debugger_closure_sizeW(debugger, addr, infoTable)
-                  * sizeof(StgWord);
-    if (size == 0)
-        return NULL;
-
-    StgClosure *closure = malloc(size);
-    if (!closure)
-        return NULL;
-
-    int i = 0;
-    int count = size / sizeof(long);    
-    while (i < count) {
-        ((long *) closure)[i] =
-            ptrace(PTRACE_PEEKDATA,
-                   debugger->child,
-                   addr + i * sizeof(long),
-                   NULL);
-        if (errno != 0) {
-            free(closure);
-            perror("copy_closure");
-            return NULL;
-        }
-        i++;
-    }
-    int j = size % sizeof(long);
-    if (j != 0) {
-        long val =
-            ptrace(PTRACE_PEEKDATA,
-                   debugger->child,
-                   addr + i * sizeof(long),
-                   NULL);
-        if (errno != 0) {
-            free(closure);
-            perror("copy_closure");
-            return NULL;
-        }
-        memcpy(((long *) closure)+i, &val, j);
-    }
-
-    return closure;
-}
-
-static
 int collect_infos(Dwfl_Module *mod, void ** x,
                   const char *name, Dwarf_Addr addr,
 			      void *arg)
@@ -337,11 +428,13 @@ int collect_infos(Dwfl_Module *mod, void ** x,
             int3_buf[0] = 0xCC;
             ptrace(PTRACE_POKEDATA, debugger->child, addr, *((void**) &int3_buf));
 
-            StgInfoTable infoTable;
-            if (!copy_infotable(debugger, addr - sizeof(StgInfoTable), &infoTable))
+            char buf[INFO_TABLE_MAX_SIZE];
+            StgInfoTable *infoTable =
+                copy_infotable(debugger, addr, buf);
+            if (infoTable == NULL)
                 return DWARF_CB_ABORT;
 
-            debugger->callbacks->register_info(name,addr,save_byte,&infoTable);
+            debugger->callbacks->register_info(name,addr,save_byte,infoTable);
         }
     }
 
@@ -415,17 +508,19 @@ int debugger_execv(char *pathname, char *const argv[],
                 ptrace(PTRACE_GETREGS, debugger.child, NULL, &regs);
                 regs.rip--;
 
-                StgInfoTable infoTable;
-                if (!copy_infotable(&debugger, regs.rip - sizeof(StgInfoTable), &infoTable)) {
+                char buf[INFO_TABLE_MAX_SIZE];
+                StgInfoTable *infoTable =
+                    copy_infotable(&debugger, regs.rip, buf);
+                if (infoTable == NULL) {
                     perror("copy_infotable");
                     exit(1);
                 }
 
-                GElf_Addr addr = (GElf_Addr) (regs.rbx & ~TAG_MASK);
-                StgClosure *closure = copy_closure(&debugger, addr, &infoTable);
+                size_t n_args;
+                StgWord *args = get_args(&debugger, infoTable, &regs, &n_args);
 
                 uint8_t save_byte;
-                if (state == 2 || debugger.callbacks->breakpoint_hit(&debugger, regs.rip, closure, &save_byte)) {
+                if (state == 2 || debugger.callbacks->breakpoint_hit(&debugger, regs.rip, n_args, args, &save_byte)) {
                     *((long*) &int3_buf) =
                         ptrace(PTRACE_PEEKDATA, debugger.child, regs.rip, NULL);
                     int3_buf[0] = save_byte;
@@ -439,8 +534,8 @@ int debugger_execv(char *pathname, char *const argv[],
                     ptrace(PTRACE_CONT, debugger.child, NULL, NULL);
                 }
 
-                if (closure != NULL)
-                    free(closure);
+                if (args != NULL)
+                    free(args);
             } else if (state == 3) {
                 *((long*) &int3_buf) =
                     ptrace(PTRACE_PEEKDATA, debugger.child, regs.rip, NULL);
@@ -467,14 +562,55 @@ StgClosure *debugger_copy_closure(Debugger *debugger, GElf_Addr addr)
     GElf_Addr infoTable_addr =
         ptrace(PTRACE_PEEKDATA, debugger->child, addr, NULL);
 
-    StgInfoTable infoTable;
-    if (!copy_infotable(debugger, infoTable_addr - sizeof(StgInfoTable), &infoTable))
+    char buf[INFO_TABLE_MAX_SIZE];
+    StgInfoTable *infoTable =
+        copy_infotable(debugger, infoTable_addr, buf);
+    if (infoTable == NULL)
         return NULL;
 
-    StgClosure *closure = copy_closure(debugger, addr, &infoTable);
-    if (closure == NULL) {
-        closure = malloc(sizeof(StgClosure));
+    int size  = debugger_closure_sizeW(debugger, addr, infoTable)
+                  * sizeof(StgWord);
+    if (size == 0) {
+        StgClosure *closure = malloc(sizeof(StgClosure));
+        if (closure == NULL)
+            return NULL;
         closure->header.info = (StgInfoTable *)infoTable_addr;
+        return closure;
     }
+
+    StgClosure *closure = malloc(size);
+    if (!closure)
+        return NULL;
+
+    int i = 0;
+    int count = size / sizeof(long);    
+    while (i < count) {
+        ((long *) closure)[i] =
+            ptrace(PTRACE_PEEKDATA,
+                   debugger->child,
+                   addr + i * sizeof(long),
+                   NULL);
+        if (errno != 0) {
+            free(closure);
+            perror("copy_closure");
+            return NULL;
+        }
+        i++;
+    }
+    int j = size % sizeof(long);
+    if (j != 0) {
+        long val =
+            ptrace(PTRACE_PEEKDATA,
+                   debugger->child,
+                   addr + i * sizeof(long),
+                   NULL);
+        if (errno != 0) {
+            free(closure);
+            perror("copy_closure");
+            return NULL;
+        }
+        memcpy(((long *) closure)+i, &val, j);
+    }
+
     return closure;
 }
