@@ -126,15 +126,44 @@ StgWord *get_args(Debugger *debugger,
 {
     *p_n_args = 0;
 
+    GElf_Addr closure_ptr = 0;
+
     int n_args = 0;
     switch (infoTable->type) {
+    case FUN_STATIC: {
+        Dwfl_Module *mod = dwfl_addrmodule(debugger->dwfl, regs->rip);
+        if (mod != NULL) {
+            GElf_Sym sym;
+            GElf_Word shndx;
+            const char *name =
+                dwfl_module_addrsym(mod, regs->rip, &sym, &shndx);
+            size_t len = strlen(name);
+            char *closure_name = alloca(len+6);
+            strcpy(closure_name, name);
+            strcpy(closure_name+len-4, "closure");
+
+            int n_sym = dwfl_module_getsymtab(mod);
+            for (int i = 0; i < n_sym; i++) {
+                Elf *elf;
+                Dwarf_Addr bias;
+
+                const char *curr_name =
+                    dwfl_module_getsym_info(mod, i, &sym, &closure_ptr,
+                                            &shndx,
+                                            &elf, &bias);
+                if (strcmp(curr_name, closure_name) == 0) {
+                    break;
+                }
+            }
+        }
+        // continue
+    }
     case FUN:
     case FUN_0_1:
     case FUN_0_2:
     case FUN_1_1:
     case FUN_2_0:
-    case FUN_1_0:
-    case FUN_STATIC: {
+    case FUN_1_0: {
         StgFunInfoTable *funInfoTable = (StgFunInfoTable *)
             (((char *) infoTable) - offsetof(StgFunInfoTable,i));
         n_args = funInfoTable->f.arity+1;
@@ -173,11 +202,11 @@ StgWord *get_args(Debugger *debugger,
         return NULL;
     StgWord *p = args;
 
-    if (n_args > 0) *(p++) = regs->rbx;
-	if (n_args > 1) *(p++) = regs->r14;
-	if (n_args > 2) *(p++) = regs->rsi;
-	if (n_args > 3) *(p++) = regs->rdi;
-	if (n_args > 4) *(p++) = regs->r8;
+    if (n_args > 0) *(p++) = closure_ptr ? closure_ptr : regs->rbx;
+    if (n_args > 1) *(p++) = regs->r14;
+    if (n_args > 2) *(p++) = regs->rsi;
+    if (n_args > 3) *(p++) = regs->rdi;
+    if (n_args > 4) *(p++) = regs->r8;
     if (n_args > 5) *(p++) = regs->r9;
     if (n_args > 6) {
         size_t i = 6;
@@ -185,7 +214,7 @@ StgWord *get_args(Debugger *debugger,
             *(p++) =
                 ptrace(PTRACE_PEEKDATA,
                        debugger->child,
-                       regs->rsp + (i-6) * sizeof(StgWord),
+                       regs->rbp + (i-6) * sizeof(StgWord),
                        NULL);
             if (errno != 0) {
                 free(args);
