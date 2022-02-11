@@ -39,4 +39,7 @@ loop dbg = do
         clo <- peekClosure dbg (read w)
         putStrLn (show clo)
         loop dbg
-       
+    ["backtrace"]->do
+        stk <- getStack dbg
+        mapM_ print stk
+        loop dbg

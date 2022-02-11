@@ -39,6 +39,7 @@ struct Debugger {
     pid_t child;
     DebuggerCallbacks *callbacks;
     Dwfl *dwfl;
+    GElf_Addr rbp;
 };
 
 static
@@ -269,6 +270,13 @@ debugger_closure_sizeW(Debugger *debugger,
     case FUN_2_0:
     case CONSTR_2_0:
         return sizeofW(StgHeader) + 2;
+    case RET_BCO:
+    case RET_SMALL:
+    case RET_BIG:
+    case RET_FUN:
+        return sizeofW(StgClosure)
+             + sizeofW(StgPtr)  * infoTable->layout.payload.ptrs
+             + sizeofW(StgWord) * infoTable->layout.payload.nptrs;
     case THUNK:
         return sizeofW(StgThunk)
              + sizeofW(StgPtr)  * infoTable->layout.payload.ptrs
@@ -354,6 +362,8 @@ debugger_closure_sizeW(Debugger *debugger,
     }
     case TREC_CHUNK:
         return sizeofW(StgTRecChunk);
+    case UNDERFLOW_FRAME:
+        return sizeofW(StgUnderflowFrame);
     default:
         return 0;
     }
@@ -479,6 +489,7 @@ int debugger_execv(char *pathname, char *const argv[],
     Debugger debugger;
     debugger.callbacks = callbacks;
     debugger.dwfl = NULL;
+    debugger.rbp = 0;
 
     debugger.child = fork();
     if (debugger.child == 0) {
@@ -551,6 +562,8 @@ int debugger_execv(char *pathname, char *const argv[],
                 size_t n_args;
                 StgWord *args = get_args(&debugger, infoTable, &regs, &n_args);
 
+                debugger.rbp = regs.rbp;
+
                 uint8_t save_byte;
                 if (state == 2 || debugger.callbacks->breakpoint_hit(&debugger, regs.rip, n_args, args, &save_byte)) {
                     *((long*) &int3_buf) =
@@ -587,14 +600,17 @@ int debugger_execv(char *pathname, char *const argv[],
     }
 }
 
-StgClosure *debugger_copy_closure(Debugger *debugger, GElf_Addr addr)
+static
+StgClosure *copy_closure_helper(Debugger *debugger, GElf_Addr addr,
+                                char *buf, size_t *psize)
 {
+    *psize = 0;
+
     addr = addr & ~TAG_MASK;
 
     GElf_Addr infoTable_addr =
         ptrace(PTRACE_PEEKDATA, debugger->child, addr, NULL);
 
-    char buf[INFO_TABLE_MAX_SIZE];
     StgInfoTable *infoTable =
         copy_infotable(debugger, infoTable_addr, buf);
     if (infoTable == NULL)
@@ -607,8 +623,11 @@ StgClosure *debugger_copy_closure(Debugger *debugger, GElf_Addr addr)
         if (closure == NULL)
             return NULL;
         closure->header.info = (StgInfoTable *)infoTable_addr;
+        *psize = sizeof(StgClosure);
         return closure;
     }
+
+    *psize = size;
 
     StgClosure *closure = malloc(size);
     if (!closure)
@@ -644,5 +663,39 @@ StgClosure *debugger_copy_closure(Debugger *debugger, GElf_Addr addr)
         memcpy(((long *) closure)+i, &val, j);
     }
 
+    return closure;
+}
+
+StgClosure *debugger_copy_closure(Debugger *debugger, GElf_Addr addr)
+{
+    size_t size;
+    char buf[INFO_TABLE_MAX_SIZE];
+    return copy_closure_helper(debugger,addr,buf,&size);
+}
+
+StgClosure *debugger_copy_stackframe(Debugger *debugger, size_t *offset)
+{
+    size_t size;
+    char buf[INFO_TABLE_MAX_SIZE];
+
+again:;
+    StgClosure *closure =
+        copy_closure_helper(debugger,debugger->rbp+*offset,buf,&size);
+    if (closure == NULL)
+        return NULL;
+
+    StgInfoTable *infoTable =
+        (StgInfoTable *) (buf + INFO_TABLE_MAX_SIZE - sizeof(StgInfoTable));
+    if (infoTable->type == UNDERFLOW_FRAME) {
+        StgUnderflowFrame* u = (StgUnderflowFrame*)closure;
+        GElf_Addr new_sp =
+            ptrace(PTRACE_PEEKDATA,
+                   debugger->child,
+                   (long) u->next_chunk+offsetof(StgStack,sp));
+        *offset=new_sp-debugger->rbp;
+        goto again;
+    }
+
+    (*offset) += size;
     return closure;
 }

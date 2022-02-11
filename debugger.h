@@ -21,4 +21,6 @@ int debugger_execv(char *pathname, char *const argv[],
 
 StgClosure *debugger_copy_closure(Debugger *debugger, GElf_Addr addr);
 
+StgClosure *debugger_copy_stackframe(Debugger *debugger, size_t *offset);
+
 #endif

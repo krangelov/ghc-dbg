@@ -23,4 +23,5 @@ executable hdb
     HDB
   extra-libraries: dw
   c-sources: debugger.c
+  cc-options: -g3 -O0
   include-dirs: .

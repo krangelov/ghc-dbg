@@ -14,7 +14,8 @@ type HeapPtr = (#type GElf_Addr)
 
 data Debugger
   = Debugger {
-      peekClosure :: HeapPtr -> IO (Maybe (String,GenClosure HeapPtr))
+      peekClosure :: HeapPtr -> IO (Maybe (String,GenClosure HeapPtr)),
+      getStack :: IO [Maybe (String,GenClosure HeapPtr)]
     }
 
 type SourceSpans = (FilePath,[(Int,Int,Int,Int)])
@@ -115,9 +116,9 @@ startDebugger args handleEvent =
             (GT,LT) -> Just LT
             _       -> Nothing
 
-    wrapDebugger ref dbg = Debugger peek
+    wrapDebugger ref dbg = Debugger peekC stack
       where
-        peek addr =
+        peekC addr =
           bracket (debugger_copy_closure dbg addr) free $ \pclosure -> do
             if pclosure == nullPtr
               then return Nothing
@@ -127,6 +128,29 @@ startDebugger args handleEvent =
                         Nothing            -> return Nothing
                         Just (name,_,itbl) -> do clo <- peekClosure name itbl pclosure
                                                  return (Just (name,clo))
+
+        stack = do
+          alloca $ \poffset -> do
+            poke poffset 0
+            getFrames poffset
+          where
+            getFrames poffset = do
+              frm  <- getFrame poffset
+              case fmap (tipe . info . snd) frm of
+                Just STOP_FRAME -> return []
+                _               -> do frms <- getFrames poffset
+                                      return (frm:frms)
+
+            getFrame poffset =
+              bracket (debugger_copy_stackframe dbg poffset) free $ \pclosure -> do
+                if pclosure == nullPtr
+                  then return Nothing
+                  else do (cu,ss,dies,breakpoints) <- readIORef ref
+                          info_ptr <- (#peek StgClosure, header.info) pclosure
+                          case Map.lookup info_ptr breakpoints of
+                            Nothing            -> return Nothing
+                            Just (name,_,itbl) -> do clo <- peekClosure name itbl pclosure
+                                                     return (Just (name,clo))
 
     peekClosure name itbl pclosure
       | pclosure /= nullPtr =
@@ -266,6 +290,7 @@ foreign import ccall debugger_execv :: CString -> Ptr CString ->
                                        Ptr DebuggerCallbacks -> IO ()
 
 foreign import ccall debugger_copy_closure :: Ptr Debugger -> HeapPtr -> IO (Ptr ())
+foreign import ccall debugger_copy_stackframe :: Ptr Debugger -> Ptr CSize -> IO (Ptr ())
 
 type Wrapper a = a -> IO (FunPtr a)
 
