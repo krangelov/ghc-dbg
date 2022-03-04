@@ -364,6 +364,8 @@ debugger_closure_sizeW(Debugger *debugger,
         return sizeofW(StgTRecChunk);
     case UNDERFLOW_FRAME:
         return sizeofW(StgUnderflowFrame);
+    case UPDATE_FRAME:
+        return sizeofW(StgUpdateFrame);
     default:
         return 0;
     }

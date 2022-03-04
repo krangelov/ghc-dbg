@@ -15,7 +15,7 @@ type HeapPtr = (#type GElf_Addr)
 data Debugger
   = Debugger {
       peekClosure :: HeapPtr -> IO (Maybe (String,GenClosure HeapPtr)),
-      getStack :: IO [Maybe (String,GenClosure HeapPtr)]
+      getStack :: IO [(String,GenClosure HeapPtr)]
     }
 
 type SourceSpans = (FilePath,[(Int,Int,Int,Int)])
@@ -136,10 +136,13 @@ startDebugger args handleEvent =
           where
             getFrames poffset = do
               frm  <- getFrame poffset
-              case fmap (tipe . info . snd) frm of
-                Just STOP_FRAME -> return []
-                _               -> do frms <- getFrames poffset
-                                      return (frm:frms)
+              case frm of
+                Nothing          -> return []
+                Just frm@(_,clo)
+                  | (tipe . info) clo == STOP_FRAME
+                                 -> return []
+                  | otherwise    -> do frms <- getFrames poffset
+                                       return (frm:frms)
 
             getFrame poffset =
               bracket (debugger_copy_stackframe dbg poffset) free $ \pclosure -> do
