@@ -263,8 +263,10 @@ startDebugger args handleEvent =
           return (MVarClosure itbl p1 p2 p3)
 
         arrWordsClosure = do
-          ([],w:ws) <- peekContent itbl pclosure
-          return (ArrWordsClosure itbl w ws)
+          bytes <- (#peek StgArrBytes, bytes) pclosure
+          payload <- peekArray (fromIntegral bytes `div` (#size StgWord))
+                               (pclosure `plusPtr` (#offset StgArrBytes, payload))
+          return (ArrWordsClosure itbl bytes payload)
 
         catchFrame = do
           ex_blocked <- (#peek StgCatchFrame, exceptions_blocked) pclosure
