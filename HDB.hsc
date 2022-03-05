@@ -270,8 +270,11 @@ startDebugger args handleEvent =
           return (WeakClosure itbl p1 p2 p3 p4 p5) -}
 
         mutArrPtrsClosure = do
-          (ps,[w1,w2]) <- peekContent itbl pclosure
-          return (MutArrClosure itbl w1 w2 ps)
+          ptrs <- (#peek StgMutArrPtrs, ptrs) pclosure
+          size <- (#peek StgMutArrPtrs, size) pclosure
+          payload <- peekArray (fromIntegral ptrs)
+                               (pclosure `plusPtr` (#offset StgMutArrPtrs, payload))
+          return (MutArrClosure itbl ptrs size payload)
 
 {-        smallMutArrPtrsClosure = do
           (ps,[w1,w2]) <- peekContent itbl pclosure
