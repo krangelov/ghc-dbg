@@ -198,6 +198,7 @@ startDebugger args handleEvent =
             MUT_ARR_PTRS_FROZEN_CLEAN -> mutArrPtrsClosure
             MUT_VAR_CLEAN -> ptr1Closure MutVarClosure
             MUT_VAR_DIRTY -> ptr1Closure MutVarClosure
+            CATCH_FRAME   -> catchFrame
 {-            WEAK          -> weakClosure -}
 {-            SMALL_MUT_ARR_PTRS_CLEAN -> smallMutArrPtrsClosure
             SMALL_MUT_ARR_PTRS_DIRTY -> smallMutArrPtrsClosure
@@ -265,9 +266,10 @@ startDebugger args handleEvent =
           ([],w:ws) <- peekContent itbl pclosure
           return (ArrWordsClosure itbl w ws)
 
-{-        weakClosure = do
-          ([p1,p2,p3,p4,p5],[]) <- peekContent itbl pclosure
-          return (WeakClosure itbl p1 p2 p3 p4 p5) -}
+        catchFrame = do
+          ex_blocked <- (#peek StgCatchFrame, exceptions_blocked) pclosure
+          handler    <- (#peek StgCatchFrame, handler) pclosure
+          return (OtherClosure itbl [handler] [ex_blocked])
 
         mutArrPtrsClosure = do
           ptrs <- (#peek StgMutArrPtrs, ptrs) pclosure
