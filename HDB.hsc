@@ -8,6 +8,7 @@ import Data.IORef
 import Data.Bits
 import qualified Data.Map as Map
 import GHC.Exts.Heap
+import GHC.Exts.Heap.Utils
 import GHC.Exts.Heap.InfoTable
 
 type HeapPtr = (#type GElf_Addr)
@@ -119,7 +120,8 @@ startDebugger args handleEvent =
     wrapDebugger ref dbg = Debugger peekC stack
       where
         peekC addr =
-          bracket (debugger_copy_closure dbg addr) free $ \pclosure -> do
+          bracket (debugger_copy_closure dbg addr)
+                  (debugger_free_closure dbg) $ \pclosure -> do
             if pclosure == nullPtr
               then return Nothing
               else do (cu,ss,dies,breakpoints) <- readIORef ref
@@ -145,7 +147,8 @@ startDebugger args handleEvent =
                                        return (frm:frms)
 
             getFrame poffset =
-              bracket (debugger_copy_stackframe dbg poffset) free $ \pclosure -> do
+              bracket (debugger_copy_stackframe dbg poffset)
+                      (debugger_free_closure dbg) $ \pclosure -> do
                 if pclosure == nullPtr
                   then return Nothing
                   else do (cu,ss,dies,breakpoints) <- readIORef ref
@@ -223,7 +226,9 @@ startDebugger args handleEvent =
       where
         constrClosure = do
           (ps,ws) <- peekContent itbl pclosure
-          return (ConstrClosure itbl ps ws "" "" name)
+          let pitbl = pclosure `plusPtr` (- #size StgInfoTable)
+          (pkg,modl,name) <- dataConNames pitbl
+          return (ConstrClosure itbl ps ws pkg modl name)
 
         thunkClosure con = do
           (ps,ws) <- peekContent itbl pclosure
@@ -291,7 +296,6 @@ startDebugger args handleEvent =
           ws <- peekArray (fromIntegral (nptrs itbl)) pwords
           return (ps,ws)
 
-
 #include "debugger.h"
 
 data DebuggerCallbacks
@@ -301,6 +305,7 @@ foreign import ccall debugger_execv :: CString -> Ptr CString ->
 
 foreign import ccall debugger_copy_closure :: Ptr Debugger -> HeapPtr -> IO (Ptr ())
 foreign import ccall debugger_copy_stackframe :: Ptr Debugger -> Ptr CSize -> IO (Ptr ())
+foreign import ccall debugger_free_closure :: Ptr Debugger -> Ptr () -> IO ()
 
 type Wrapper a = a -> IO (FunPtr a)
 

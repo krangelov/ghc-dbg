@@ -89,7 +89,7 @@ StgInfoTable *copy_infotable(Debugger *debugger,
     case CONSTR_2_0:
     case CONSTR_1_0:
     case CONSTR_NOCAF:
-        sz = sizeof(StgFunInfoTable);
+        sz = sizeof(StgConInfoTable);
         break;
     }
 
@@ -604,7 +604,7 @@ int debugger_execv(char *pathname, char *const argv[],
 
 static
 StgClosure *copy_closure_helper(Debugger *debugger, GElf_Addr addr,
-                                char *buf, size_t *psize)
+                                size_t *psize)
 {
     *psize = 0;
 
@@ -613,56 +613,90 @@ StgClosure *copy_closure_helper(Debugger *debugger, GElf_Addr addr,
     GElf_Addr infoTable_addr =
         ptrace(PTRACE_PEEKDATA, debugger->child, addr, NULL);
 
+    char buf[INFO_TABLE_MAX_SIZE];
     StgInfoTable *infoTable =
         copy_infotable(debugger, infoTable_addr, buf);
     if (infoTable == NULL)
         return NULL;
 
-    int size  = debugger_closure_sizeW(debugger, addr, infoTable)
-                  * sizeof(StgWord);
+    int size = debugger_closure_sizeW(debugger, addr, infoTable)
+                 * sizeof(StgWord);
     if (size == 0) {
-        StgClosure *closure = malloc(sizeof(StgClosure));
-        if (closure == NULL)
-            return NULL;
-        closure->header.info = (StgInfoTable *)infoTable_addr;
-        *psize = sizeof(StgClosure);
-        return closure;
+        size = sizeof(StgClosure);
     }
-
     *psize = size;
 
-    StgClosure *closure = malloc(size);
-    if (!closure)
-        return NULL;
+    char  *name = NULL;
+    size_t name_len = 0;
+    if (infoTable->type == CONSTR ||
+        infoTable->type == CONSTR_0_1 ||
+        infoTable->type == CONSTR_0_2 ||
+        infoTable->type == CONSTR_1_1 ||
+        infoTable->type == CONSTR_2_0 ||
+        infoTable->type == CONSTR_1_0 ||
+        infoTable->type == CONSTR_NOCAF) {
+            StgConInfoTable *conInfoTable =
+                (StgConInfoTable *)
+                    (((char*) infoTable) - offsetof(StgConInfoTable,i));
+            GElf_Addr name_addr =
+                infoTable_addr + conInfoTable->con_desc;
+            conInfoTable->con_desc = size;
 
-    int i = 0;
-    int count = size / sizeof(long);    
-    while (i < count) {
-        ((long *) closure)[i] =
-            ptrace(PTRACE_PEEKDATA,
-                   debugger->child,
-                   addr + i * sizeof(long),
-                   NULL);
-        if (errno != 0) {
-            free(closure);
-            perror("copy_closure");
-            return NULL;
-        }
-        i++;
+            size_t size = 0;
+            for (;;) {
+                if (name_len + sizeof(long) >= size) {
+                    size += sizeof(long)*4;
+                    name = realloc(name, size);
+                }
+
+                *((long *) (name+name_len)) =
+                    ptrace(PTRACE_PEEKDATA,
+                           debugger->child,
+                           name_addr + name_len,
+                           NULL);
+                if (errno != 0) {
+                    free(name);
+                    perror("copy_closure");
+                    return NULL;
+                }
+
+                for (size_t i = 0; i < sizeof(long); i++) {
+                    if (name[name_len] == 0)
+                        goto done;
+                    name_len++;
+                }
+            }
+
+    done:;
     }
-    int j = size % sizeof(long);
-    if (j != 0) {
-        long val =
+
+    char *copy = malloc(sizeof(buf)+size+name_len);
+    if (!copy) {
+        free(name);
+        return NULL;
+    }
+    memcpy(copy, buf, sizeof(buf));
+
+    StgClosure *closure = (StgClosure*) (copy + sizeof(buf));
+    size_t offs = 0;
+    while (offs < size) {
+        ((long *) closure)[offs/sizeof(long)] =
             ptrace(PTRACE_PEEKDATA,
                    debugger->child,
-                   addr + i * sizeof(long),
+                   addr + offs,
                    NULL);
         if (errno != 0) {
+            free(name);
             free(closure);
             perror("copy_closure");
             return NULL;
         }
-        memcpy(((long *) closure)+i, &val, j);
+        offs += sizeof(long);
+    }
+
+    if (name != NULL) {
+        memcpy(copy + sizeof(buf) + size, name, name_len+1);
+        free(name);
     }
 
     return closure;
@@ -671,23 +705,21 @@ StgClosure *copy_closure_helper(Debugger *debugger, GElf_Addr addr,
 StgClosure *debugger_copy_closure(Debugger *debugger, GElf_Addr addr)
 {
     size_t size;
-    char buf[INFO_TABLE_MAX_SIZE];
-    return copy_closure_helper(debugger,addr,buf,&size);
+    return copy_closure_helper(debugger,addr,&size);
 }
 
 StgClosure *debugger_copy_stackframe(Debugger *debugger, size_t *offset)
 {
     size_t size;
-    char buf[INFO_TABLE_MAX_SIZE];
 
 again:;
     StgClosure *closure =
-        copy_closure_helper(debugger,debugger->rbp+*offset,buf,&size);
+        copy_closure_helper(debugger,debugger->rbp+*offset,&size);
     if (closure == NULL)
         return NULL;
 
     StgInfoTable *infoTable =
-        (StgInfoTable *) (buf + INFO_TABLE_MAX_SIZE - sizeof(StgInfoTable));
+        (StgInfoTable *) (((char*) closure) - sizeof(StgInfoTable));
     if (infoTable->type == UNDERFLOW_FRAME) {
         StgUnderflowFrame* u = (StgUnderflowFrame*)closure;
         GElf_Addr new_sp =
@@ -700,4 +732,11 @@ again:;
 
     (*offset) += size;
     return closure;
+}
+
+void debugger_free_closure(Debugger *debugger, StgClosure *closure)
+{
+    if (closure == NULL)
+        return;
+    free(((char*) closure) - INFO_TABLE_MAX_SIZE);
 }
