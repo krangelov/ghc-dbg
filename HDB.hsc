@@ -167,73 +167,71 @@ startDebugger args handleEvent =
                           clo <- peekClosure name itbl pclosure
                           return (Just (name,clo))
 
-    peekClosure name itbl pclosure
-      | pclosure /= nullPtr =
-          case tipe itbl of
-            CONSTR        -> constrClosure 
-            CONSTR_1_0    -> constrClosure
-            CONSTR_0_1
-              | name == "ghczmprim_GHCziTypes_Izh_con_info" -> do
-                             ([],[w]) <- peekContent itbl pclosure
-                             return (IntClosure PInt (fromIntegral w))
-              | otherwise -> constrClosure
-            CONSTR_2_0    -> constrClosure
-            CONSTR_1_1    -> constrClosure
-            CONSTR_0_2    -> constrClosure
-            FUN           -> thunkClosure FunClosure
-            FUN_1_0       -> thunkClosure FunClosure
-            FUN_0_1       -> thunkClosure FunClosure
-            FUN_2_0       -> thunkClosure FunClosure
-            FUN_1_1       -> thunkClosure FunClosure
-            FUN_0_2       -> thunkClosure FunClosure
-            THUNK         -> thunkClosure ThunkClosure
-            THUNK_1_0     -> thunkClosure ThunkClosure
-            THUNK_0_1     -> thunkClosure ThunkClosure
-            THUNK_2_0     -> thunkClosure ThunkClosure
-            THUNK_1_1     -> thunkClosure ThunkClosure
-            THUNK_0_2     -> thunkClosure ThunkClosure
-            THUNK_STATIC  -> thunkClosure ThunkClosure
-            THUNK_SELECTOR-> selectorClosure
-            AP            -> papClosure APClosure
-            PAP           -> papClosure PAPClosure
-            AP_STACK      -> apStackClosure
-            IND           -> ptr1Closure IndClosure
-            IND_STATIC    -> ptr1Closure IndClosure
-            BLOCKING_QUEUE-> blockingQueueClosure
-            BLACKHOLE     -> ptr1Closure BlackholeClosure
-            MVAR_CLEAN    -> mvarClosure
-            MVAR_DIRTY    -> mvarClosure
-            ARR_WORDS     -> arrWordsClosure
-            MUT_ARR_PTRS_CLEAN -> mutArrPtrsClosure
-            MUT_ARR_PTRS_DIRTY -> mutArrPtrsClosure
-            MUT_ARR_PTRS_FROZEN_DIRTY -> mutArrPtrsClosure
-            MUT_ARR_PTRS_FROZEN_CLEAN -> mutArrPtrsClosure
-            MUT_VAR_CLEAN -> ptr1Closure MutVarClosure
-            MUT_VAR_DIRTY -> ptr1Closure MutVarClosure
-            RET_SMALL     -> retSmall
-            CATCH_FRAME   -> catchFrame
+    peekClosure name itbl pclosure =
+      case tipe itbl of
+        CONSTR        -> constrClosure 
+        CONSTR_1_0    -> constrClosure
+        CONSTR_0_1
+          | name == "ghczmprim_GHCziTypes_Izh_con_info" -> do
+                         ([],[w]) <- peekContent itbl pclosure
+                         return (IntClosure PInt (fromIntegral w))
+          | otherwise -> constrClosure
+        CONSTR_2_0    -> constrClosure
+        CONSTR_1_1    -> constrClosure
+        CONSTR_0_2    -> constrClosure
+        FUN           -> thunkClosure FunClosure
+        FUN_1_0       -> thunkClosure FunClosure
+        FUN_0_1       -> thunkClosure FunClosure
+        FUN_2_0       -> thunkClosure FunClosure
+        FUN_1_1       -> thunkClosure FunClosure
+        FUN_0_2       -> thunkClosure FunClosure
+        THUNK         -> thunkClosure ThunkClosure
+        THUNK_1_0     -> thunkClosure ThunkClosure
+        THUNK_0_1     -> thunkClosure ThunkClosure
+        THUNK_2_0     -> thunkClosure ThunkClosure
+        THUNK_1_1     -> thunkClosure ThunkClosure
+        THUNK_0_2     -> thunkClosure ThunkClosure
+        THUNK_STATIC  -> thunkClosure ThunkClosure
+        THUNK_SELECTOR-> selectorClosure
+        AP            -> papClosure APClosure
+        PAP           -> papClosure PAPClosure
+        AP_STACK      -> apStackClosure
+        IND           -> ptr1Closure IndClosure
+        IND_STATIC    -> ptr1Closure IndClosure
+        BLOCKING_QUEUE-> blockingQueueClosure
+        BLACKHOLE     -> ptr1Closure BlackholeClosure
+        MVAR_CLEAN    -> mvarClosure
+        MVAR_DIRTY    -> mvarClosure
+        ARR_WORDS     -> arrWordsClosure
+        MUT_ARR_PTRS_CLEAN -> mutArrPtrsClosure
+        MUT_ARR_PTRS_DIRTY -> mutArrPtrsClosure
+        MUT_ARR_PTRS_FROZEN_DIRTY -> mutArrPtrsClosure
+        MUT_ARR_PTRS_FROZEN_CLEAN -> mutArrPtrsClosure
+        MUT_VAR_CLEAN -> ptr1Closure MutVarClosure
+        MUT_VAR_DIRTY -> ptr1Closure MutVarClosure
+        RET_SMALL     -> retSmall
+        CATCH_FRAME   -> catchFrame
 {-            WEAK          -> weakClosure -}
 {-            SMALL_MUT_ARR_PTRS_CLEAN -> smallMutArrPtrsClosure
-            SMALL_MUT_ARR_PTRS_DIRTY -> smallMutArrPtrsClosure
-            SMALL_MUT_ARR_PTRS_FROZEN_DIRTY -> smallMutArrPtrsClosure
-            SMALL_MUT_ARR_PTRS_FROZEN_CLEAN -> smallMutArrPtrsClosure-}
-            INVALID_OBJECT -> return (UnsupportedClosure itbl)
-            _ | name == "base_GHCziInt_Izh_con_info"    -> do
-                             ([],[w]) <- peekContent itbl pclosure
-                             return (Int64Closure PInt (fromIntegral w))
-              | name == "base_GHCziWord_Wzh_con_info"   -> do
-                             ([],[w]) <- peekContent itbl pclosure
-                             return (Word64Closure PWord (fromIntegral w))
-              | name == "base_GHCziInt_I64zh_con_info"  -> do
-                             ([],[w]) <- peekContent itbl pclosure
-                             return (Int64Closure PInt64 (fromIntegral w))
-              | name == "base_GHCziWord_W64zh_con_info" -> do
-                             ([],[w]) <- peekContent itbl pclosure
-                             return (Word64Closure PWord64 (fromIntegral w))
-              | otherwise                               -> do
-                             (ps,ws) <- peekContent itbl pclosure
-                             return (OtherClosure itbl ps ws)
-      | otherwise = return (UnsupportedClosure itbl)
+        SMALL_MUT_ARR_PTRS_DIRTY -> smallMutArrPtrsClosure
+        SMALL_MUT_ARR_PTRS_FROZEN_DIRTY -> smallMutArrPtrsClosure
+        SMALL_MUT_ARR_PTRS_FROZEN_CLEAN -> smallMutArrPtrsClosure-}
+        INVALID_OBJECT -> return (UnsupportedClosure itbl)
+        _ | name == "base_GHCziInt_Izh_con_info"    -> do
+                         ([],[w]) <- peekContent itbl pclosure
+                         return (Int64Closure PInt (fromIntegral w))
+          | name == "base_GHCziWord_Wzh_con_info"   -> do
+                         ([],[w]) <- peekContent itbl pclosure
+                         return (Word64Closure PWord (fromIntegral w))
+          | name == "base_GHCziInt_I64zh_con_info"  -> do
+                         ([],[w]) <- peekContent itbl pclosure
+                         return (Int64Closure PInt64 (fromIntegral w))
+          | name == "base_GHCziWord_W64zh_con_info" -> do
+                         ([],[w]) <- peekContent itbl pclosure
+                         return (Word64Closure PWord64 (fromIntegral w))
+          | otherwise                               -> do
+                         (ps,ws) <- peekContent itbl pclosure
+                         return (OtherClosure itbl ps ws)
       where
         constrClosure = do
           (ps,ws) <- peekContent itbl pclosure
