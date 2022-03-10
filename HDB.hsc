@@ -6,12 +6,16 @@ import Foreign.Ptr
 import Control.Exception
 import Data.IORef
 import Data.Bits
+import Numeric (showHex)
 import qualified Data.Map as Map
 import GHC.Exts.Heap
 import GHC.Exts.Heap.Utils
 import GHC.Exts.Heap.InfoTable
 
 type HeapPtr = (#type GElf_Addr)
+
+bitmap_SIZE_MASK  = 0x3f
+bitmap_BITS_SHIFT = 6
 
 data Debugger
   = Debugger {
@@ -40,13 +44,13 @@ startDebugger args handleEvent =
       (bracket (wrapRegisterCompUnit (register_comp_unit ref)) freeHaskellFunPtr $ \c_register_comp_unit ->
        bracket (wrapRegisterSubProg (register_subprog ref)) freeHaskellFunPtr $ \c_register_subprog ->
        bracket (wrapRegisterScope (register_scope ref)) freeHaskellFunPtr $ \c_register_scope ->
-       bracket (wrapRegisterInfo (register_info ref)) freeHaskellFunPtr $ \c_register_info ->
+       bracket (wrapRegisterName (register_name ref)) freeHaskellFunPtr $ \c_register_name ->
        bracket (wrapBreakpointHit (breakpoint_hit ref)) freeHaskellFunPtr $ \c_breakpoint_hit ->
        allocaBytes (#size DebuggerCallbacks) $ \c_callbacks -> do
          (#poke DebuggerCallbacks, register_comp_unit) c_callbacks c_register_comp_unit
          (#poke DebuggerCallbacks, register_subprog) c_callbacks c_register_subprog
          (#poke DebuggerCallbacks, register_scope) c_callbacks c_register_scope
-         (#poke DebuggerCallbacks, register_info) c_callbacks c_register_info
+         (#poke DebuggerCallbacks, register_name) c_callbacks c_register_name
          (#poke DebuggerCallbacks, breakpoint_hit) c_callbacks c_breakpoint_hit
          fn c_callbacks)
       where
@@ -76,21 +80,20 @@ startDebugger args handleEvent =
                   )
           writeIORef ref (cu,add_scope s ss,dies,breakpoints)
 
-        register_info ref c_name addr save_byte c_infoTable = do
+        register_name ref c_name addr save_byte = do
           name <- peekCString c_name
-          itbl <- peekItbl c_infoTable
           (cu,ss,dies,breakpoints) <- readIORef ref
-          writeIORef ref $! (cu,ss,dies,Map.insert addr (name,save_byte,itbl) breakpoints)
+          writeIORef ref $! (cu,ss,dies,Map.insert addr (name,save_byte) breakpoints)
 
         breakpoint_hit ref dbg addr n_args args p_save_byte = do
           (cu,ss,dies,breakpoints) <- readIORef ref
           case Map.lookup addr breakpoints of
-            Just (name,save_byte,itbl) -> do poke p_save_byte save_byte
-                                             args <- peekArray (fromIntegral n_args) args
-                                             let die = Map.lookup name dies
-                                             handleEvent (wrapDebugger ref dbg) name die args
-                                             return 1
-            Nothing                    -> do return 0
+            Just (name,save_byte) -> do poke p_save_byte save_byte
+                                        args <- peekArray (fromIntegral n_args) args
+                                        let die = Map.lookup name dies
+                                        handleEvent (wrapDebugger ref dbg) name die args
+                                        return 1
+            Nothing               -> do return 0
 
         add_scope s []      = [s]
         add_scope s (s':ss) =
@@ -126,10 +129,13 @@ startDebugger args handleEvent =
               then return Nothing
               else do (cu,ss,dies,breakpoints) <- readIORef ref
                       info_ptr <- (#peek StgClosure, header.info) pclosure
-                      case Map.lookup info_ptr breakpoints of
-                        Nothing            -> return Nothing
-                        Just (name,_,itbl) -> do clo <- peekClosure name itbl pclosure
-                                                 return (Just (name,clo))
+                      let name =
+                            case Map.lookup info_ptr breakpoints of
+                              Nothing       -> 's':'c':':':showHex info_ptr ""
+                              Just (name,_) -> name
+                      itbl <- peekItbl (pclosure `plusPtr` (- (#size StgInfoTable)))
+                      clo <- peekClosure name itbl pclosure
+                      return (Just (name,clo))
 
         stack = do
           alloca $ \poffset -> do
@@ -153,10 +159,13 @@ startDebugger args handleEvent =
                   then return Nothing
                   else do (cu,ss,dies,breakpoints) <- readIORef ref
                           info_ptr <- (#peek StgClosure, header.info) pclosure
-                          case Map.lookup info_ptr breakpoints of
-                            Nothing            -> return Nothing
-                            Just (name,_,itbl) -> do clo <- peekClosure name itbl pclosure
-                                                     return (Just (name,clo))
+                          let name =
+                                case Map.lookup info_ptr breakpoints of
+                                  Nothing       -> 's':'c':':':showHex info_ptr ""
+                                  Just (name,_) -> name
+                          itbl <- peekItbl (pclosure `plusPtr` (- (#size StgInfoTable)))
+                          clo <- peekClosure name itbl pclosure
+                          return (Just (name,clo))
 
     peekClosure name itbl pclosure
       | pclosure /= nullPtr =
@@ -201,12 +210,14 @@ startDebugger args handleEvent =
             MUT_ARR_PTRS_FROZEN_CLEAN -> mutArrPtrsClosure
             MUT_VAR_CLEAN -> ptr1Closure MutVarClosure
             MUT_VAR_DIRTY -> ptr1Closure MutVarClosure
+            RET_SMALL     -> retSmall
             CATCH_FRAME   -> catchFrame
 {-            WEAK          -> weakClosure -}
 {-            SMALL_MUT_ARR_PTRS_CLEAN -> smallMutArrPtrsClosure
             SMALL_MUT_ARR_PTRS_DIRTY -> smallMutArrPtrsClosure
             SMALL_MUT_ARR_PTRS_FROZEN_DIRTY -> smallMutArrPtrsClosure
             SMALL_MUT_ARR_PTRS_FROZEN_CLEAN -> smallMutArrPtrsClosure-}
+            INVALID_OBJECT -> return (UnsupportedClosure itbl)
             _ | name == "base_GHCziInt_Izh_con_info"    -> do
                              ([],[w]) <- peekContent itbl pclosure
                              return (Int64Closure PInt (fromIntegral w))
@@ -273,6 +284,13 @@ startDebugger args handleEvent =
                                (pclosure `plusPtr` (#offset StgArrBytes, payload))
           return (ArrWordsClosure itbl bytes payload)
 
+        retSmall = do
+          let bitmap = (nptrs itbl `shiftL` 32) .|. (ptrs itbl)
+          (ps,ws) <- peekBitmap (bitmap .&. bitmap_SIZE_MASK)
+                                (bitmap `shiftR` bitmap_BITS_SHIFT)
+                                (pclosure `plusPtr` (#size StgHeader))
+          return (OtherClosure itbl ps ws)
+
         catchFrame = do
           ex_blocked <- (#peek StgCatchFrame, exceptions_blocked) pclosure
           handler    <- (#peek StgCatchFrame, handler) pclosure
@@ -296,6 +314,17 @@ startDebugger args handleEvent =
           ws <- peekArray (fromIntegral (nptrs itbl)) pwords
           return (ps,ws)
 
+        peekBitmap size bitmap ptr
+          | size == 0 = return ([],[])
+          | bitmap .&. 1 == 0 = do
+              p <- peek (castPtr ptr)
+              (ps,ws) <- peekBitmap (size-1) (bitmap `shiftR` 1) (ptr `plusPtr` (sizeOf (undefined :: HeapPtr)))
+              return (p:ps,ws)
+          | bitmap .&. 1 == 1 = do
+              w <- peek (castPtr ptr)
+              (ps,ws) <- peekBitmap (size-1) (bitmap `shiftR` 1) (ptr `plusPtr` (sizeOf (undefined :: Word)))
+              return (ps,w:ws)
+
 #include "debugger.h"
 
 data DebuggerCallbacks
@@ -312,5 +341,5 @@ type Wrapper a = a -> IO (FunPtr a)
 foreign import ccall "wrapper" wrapRegisterCompUnit :: Wrapper (CString -> CString -> IO ())
 foreign import ccall "wrapper" wrapRegisterSubProg :: Wrapper (CString -> IO ())
 foreign import ccall "wrapper" wrapRegisterScope :: Wrapper (CInt -> CInt -> CInt -> CInt -> IO ())
-foreign import ccall "wrapper" wrapRegisterInfo :: Wrapper (CString -> (#type GElf_Addr) -> (#type uint8_t) -> Ptr StgInfoTable -> IO ())
+foreign import ccall "wrapper" wrapRegisterName :: Wrapper (CString -> (#type GElf_Addr) -> (#type uint8_t) -> IO ())
 foreign import ccall "wrapper" wrapBreakpointHit :: Wrapper (Ptr Debugger -> (#type GElf_Addr) -> CSize -> Ptr (#type StgWord) -> Ptr (#type uint8_t) -> IO CInt)
