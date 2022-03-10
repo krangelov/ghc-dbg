@@ -148,7 +148,7 @@ startDebugger args handleEvent =
                 Nothing          -> return []
                 Just frm@(_,clo)
                   | (tipe . info) clo == STOP_FRAME
-                                 -> return []
+                                 -> return [frm]
                   | otherwise    -> do frms <- getFrames poffset
                                        return (frm:frms)
 
