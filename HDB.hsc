@@ -20,7 +20,8 @@ bitmap_BITS_SHIFT = 6
 data Debugger
   = Debugger {
       peekClosure :: HeapPtr -> IO (Maybe (String,GenClosure HeapPtr)),
-      getStack :: IO [(String,GenClosure HeapPtr)]
+      getStack :: IO [(String,GenClosure HeapPtr)],
+      findFunction :: FilePath -> (Int,Int,Int,Int) -> IO [String]
     }
 
 type SourceSpans = (FilePath,[(Int,Int,Int,Int)])
@@ -97,30 +98,30 @@ startDebugger args handleEvent =
 
         add_scope s []      = [s]
         add_scope s (s':ss) =
-          case cmp s s' of
+          case cmpSpan s s' of
             Just LT -> s':ss
             Just EQ -> s :ss
             Just GT -> s :remove_scope s ss
-            Nothing -> add_scope s ss
+            Nothing -> s':add_scope s ss
 
         remove_scope s []      = []
         remove_scope s (s':ss) =
-          case cmp s s' of
+          case cmpSpan s s' of
             Just GT -> remove_scope s ss
             _       -> s':remove_scope s ss
 
-        cmp (sl1,sc1,el1,ec1) (sl2,sc2,el2,ec2) =
-          case (compare (sl1,sc1) (sl2,sc2),compare (el1,ec1) (el2,ec2)) of
-            (LT,GT) -> Just GT
-            (EQ,GT) -> Just GT
-            (LT,EQ) -> Just GT
-            (EQ,EQ) -> Just EQ
-            (GT,EQ) -> Just LT
-            (EQ,LT) -> Just LT
-            (GT,LT) -> Just LT
-            _       -> Nothing
+    cmpSpan (sl1,sc1,el1,ec1) (sl2,sc2,el2,ec2) =
+      case (compare (sl1,sc1) (sl2,sc2),compare (el1,ec1) (el2,ec2)) of
+        (LT,GT) -> Just GT
+        (EQ,GT) -> Just GT
+        (LT,EQ) -> Just GT
+        (EQ,EQ) -> Just EQ
+        (GT,EQ) -> Just LT
+        (EQ,LT) -> Just LT
+        (GT,LT) -> Just LT
+        _       -> Nothing
 
-    wrapDebugger ref dbg = Debugger peekC stack
+    wrapDebugger ref dbg = Debugger peekC stack findFunction
       where
         peekC addr =
           bracket (debugger_copy_closure dbg addr)
@@ -166,6 +167,36 @@ startDebugger args handleEvent =
                           itbl <- peekItbl (pclosure `plusPtr` (- (#size StgInfoTable)))
                           clo <- peekClosure name itbl pclosure
                           return (Just (name,clo))
+
+        findFunction fpath span = do
+          (cu,ss,dies,breakpoints) <- readIORef ref
+          return (filterRoots
+                    [(name,span) | (name,(cu,ss)) <- Map.toList dies
+                                 , cu == fpath
+                                 , span <- concatMap (match span) ss])
+          where
+            match s1 s2 =
+              case cmpSpan s1 s2 of
+                Just EQ -> [s2]
+                Just GT -> [s2]
+                _       -> []
+
+            filterRoots nss = map fst (foldr add_scope [] nss)
+
+            add_scope ns       []               = [ns]
+            add_scope ns@(_,s) (ns'@(_,s'):nss) =
+              case cmpSpan s s' of
+                Just LT -> ns':nss
+                Just EQ -> ns :nss
+                Just GT -> ns :remove_scope s nss
+                Nothing -> ns':add_scope ns nss
+
+            remove_scope s []               = []
+            remove_scope s (ns'@(_,s'):nss) =
+              case cmpSpan s s' of
+                Just GT -> remove_scope s nss
+                _       -> ns':remove_scope s nss
+
 
     peekClosure name itbl pclosure =
       case tipe itbl of
