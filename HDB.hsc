@@ -36,7 +36,10 @@ startDebugger args handleEvent =
   withArgs args $ \c_prog_args@(c_prog:_) ->
   withArray0 nullPtr c_prog_args $ \c_prog_args ->
   withCallbacks $ \c_callbacks -> do
-     debugger_execv c_prog c_prog_args c_callbacks
+     errno <- debugger_execv c_prog c_prog_args c_callbacks
+     if errno /= 0
+       then ioError (errnoToIOError "startDebugger" (Errno errno) Nothing (Just (head args)))
+       else return ()
   where
     withArgs []         fn = fn []
     withArgs (arg:args) fn =
@@ -387,7 +390,7 @@ bitmap_BITS_SHIFT = 6
 data DebuggerCallbacks
 
 foreign import ccall debugger_execv :: CString -> Ptr CString ->
-                                       Ptr DebuggerCallbacks -> IO ()
+                                       Ptr DebuggerCallbacks -> IO CInt
 
 foreign import ccall debugger_copy_closure :: Ptr Debugger -> HeapPtr -> IO (Ptr ())
 foreign import ccall debugger_copy_stackframe :: Ptr Debugger -> Ptr CSize -> IO (Ptr ())

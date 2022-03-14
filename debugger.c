@@ -514,20 +514,27 @@ int debugger_execv(char *pathname, char *const argv[],
     debugger.rbp = 0;
 
     debugger.child = fork();
-    if (debugger.child == 0) {
+    if (debugger.child == -1) {
+        return errno;
+    } else if (debugger.child == 0) {
         ptrace(PTRACE_TRACEME, 0, NULL, NULL);
         execv(pathname, argv);
+        exit(127);
     } else {
         int state = 0;
+        int res   = 0;
 
         while(1) {
             int status;
             if (waitpid(debugger.child, &status, 0) < 0) {
-                perror("waitpid");
+                res = errno;
                 break;
             }
-            if(WIFEXITED(status))
+            if (WIFEXITED(status)) {
+                if (WEXITSTATUS(status) == 127)
+                    res = ENOENT;
                 break;
+            }
 
             struct user_regs_struct regs;
             uint8_t int3_buf[sizeof(long)];
@@ -629,6 +636,8 @@ int debugger_execv(char *pathname, char *const argv[],
 
         if (debugger.dwfl != NULL)
             dwfl_end(debugger.dwfl);
+
+        return res;
     }
 }
 
