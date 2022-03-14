@@ -15,6 +15,7 @@ main = do
                                mapM_ (printSpan ls) spans
       Nothing            -> return ()
     loop dbg
+    return Step
 
 printSpan ls (sl,sc,el,ec) = do
   let ls' = case take (el-sl+1) (drop (sl-1) ls) of

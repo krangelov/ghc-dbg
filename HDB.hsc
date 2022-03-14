@@ -1,4 +1,4 @@
-module HDB(startDebugger,HeapPtr,Debugger(..)) where
+module HDB(startDebugger,HeapPtr,Debugger(..),DebuggerAction(..)) where
 
 import Foreign
 import Foreign.C
@@ -14,19 +14,24 @@ import GHC.Exts.Heap.InfoTable
 
 type HeapPtr = (#type GElf_Addr)
 
-bitmap_SIZE_MASK  = 0x3f
-bitmap_BITS_SHIFT = 6
+type LinkerName = String
 
 data Debugger
   = Debugger {
-      peekClosure :: HeapPtr -> IO (Maybe (String,GenClosure HeapPtr)),
-      getStack :: IO [(String,GenClosure HeapPtr)],
-      findFunction :: FilePath -> (Int,Int,Int,Int) -> IO [String]
+      peekClosure :: HeapPtr -> IO (Maybe (LinkerName,GenClosure HeapPtr)),
+      getStack :: IO [(LinkerName,GenClosure HeapPtr)],
+      findFunction :: FilePath -> (Int,Int,Int,Int) -> IO [LinkerName]
     }
 
 type SourceSpans = (FilePath,[(Int,Int,Int,Int)])
 
-startDebugger :: [String] -> (Debugger -> String -> Maybe SourceSpans -> [HeapPtr] -> IO ()) -> IO ()
+data DebuggerAction
+  = Step
+  | Stop
+  | Continue [LinkerName]   -- ^ Continue the program until one of the
+                            -- listed names is encountered
+
+startDebugger :: [String] -> (Debugger -> LinkerName -> Maybe SourceSpans -> [HeapPtr] -> IO DebuggerAction) -> IO ()
 startDebugger args handleEvent =
   withArgs args $ \c_prog_args@(c_prog:_) ->
   withArray0 nullPtr c_prog_args $ \c_prog_args ->
@@ -41,7 +46,7 @@ startDebugger args handleEvent =
 
     withCallbacks :: (Ptr DebuggerCallbacks -> IO a) -> IO a
     withCallbacks fn = do
-      ref <- newIORef ("",[],Map.empty,Map.empty)
+      ref <- newIORef ("",[],Map.empty,Map.empty,Step)
       (bracket (wrapRegisterCompUnit (register_comp_unit ref)) freeHaskellFunPtr $ \c_register_comp_unit ->
        bracket (wrapRegisterSubProg (register_subprog ref)) freeHaskellFunPtr $ \c_register_subprog ->
        bracket (wrapRegisterScope (register_scope ref)) freeHaskellFunPtr $ \c_register_scope ->
@@ -62,38 +67,47 @@ startDebugger args handleEvent =
           fname    <- if c_fname == nullPtr
                         then return ""
                         else peekCString c_fname
-          (cu,ss,dies,breakpoints) <- readIORef ref
-          writeIORef ref (comp_dir++fname,[],dies,breakpoints)
+          (cu,ss,dies,names,action) <- readIORef ref
+          writeIORef ref (comp_dir++fname,[],dies,names,action)
 
         register_subprog ref c_name = do
           name <- if c_name == nullPtr
                     then return ""
                     else peekCString c_name
-          (cu,ss,dies,breakpoints) <- readIORef ref
-          writeIORef ref (cu,[],Map.insert name (cu,ss) dies,breakpoints)
+          (cu,ss,dies,names,action) <- readIORef ref
+          writeIORef ref (cu,[],Map.insert name (cu,ss) dies,names,action)
 
         register_scope ref c_start_line c_start_col c_end_line c_end_col = do
-          (cu,ss,dies,breakpoints) <- readIORef ref
+          (cu,ss,dies,names,action) <- readIORef ref
           let s = (fromIntegral c_start_line
                   ,fromIntegral c_start_col
                   ,fromIntegral c_end_line
                   ,fromIntegral c_end_col
                   )
-          writeIORef ref (cu,add_scope s ss,dies,breakpoints)
+          writeIORef ref (cu,add_scope s ss,dies,names,action)
 
         register_name ref c_name addr save_byte = do
           name <- peekCString c_name
-          (cu,ss,dies,breakpoints) <- readIORef ref
-          writeIORef ref $! (cu,ss,dies,Map.insert addr (name,save_byte) breakpoints)
+          (cu,ss,dies,names,action) <- readIORef ref
+          writeIORef ref $! (cu,ss,dies,Map.insert addr (name,save_byte) names,action)
 
         breakpoint_hit ref dbg addr n_args args p_save_byte = do
-          (cu,ss,dies,breakpoints) <- readIORef ref
-          case Map.lookup addr breakpoints of
+          (cu,ss,dies,names,action) <- readIORef ref
+          case Map.lookup addr names of
             Just (name,save_byte) -> do poke p_save_byte save_byte
                                         args <- peekArray (fromIntegral n_args) args
                                         let die = Map.lookup name dies
-                                        handleEvent (wrapDebugger ref dbg) name die args
-                                        return 1
+                                        new_action <- handleEvent (wrapDebugger ref dbg) name die args
+                                        writeIORef ref (cu,ss,dies,names,new_action)
+                                        case (action,new_action) of
+                                          (Step,        Step        ) -> return 1
+                                          (Step,        Continue bs ) -> remove_breakpoints dbg name names bs
+                                          (_           ,Stop        ) -> return 3
+                                          (Continue bs ,Step        ) -> set_breakpoints    dbg name names bs
+                                          (Continue bs1,Continue bs2)
+                                             | bs1 == bs2             -> return 1
+                                             | otherwise              -> set_breakpoints    dbg name names bs1 >>
+                                                                         remove_breakpoints dbg name names bs2
             Nothing               -> do return 0
 
         add_scope s []      = [s]
@@ -109,6 +123,17 @@ startDebugger args handleEvent =
           case cmpSpan s s' of
             Just GT -> remove_scope s ss
             _       -> s':remove_scope s ss
+
+        set_breakpoints dbg name names bs = do
+          sequence_ [debugger_poke dbg addr 0xCC | (addr, (name, save_byte)) <- Map.toList names
+                                                 , not (name `elem` bs)]
+          return (if name `elem` bs then 2 else 1)
+
+        remove_breakpoints dbg name names bs = do
+          sequence_ [debugger_poke dbg addr save_byte
+                                                 | (addr, (name, save_byte)) <- Map.toList names
+                                                 , not (name `elem` bs)]
+          return (if name `elem` bs then 1 else 2)
 
     cmpSpan (sl1,sc1,el1,ec1) (sl2,sc2,el2,ec2) =
       case (compare (sl1,sc1) (sl2,sc2),compare (el1,ec1) (el2,ec2)) of
@@ -128,10 +153,10 @@ startDebugger args handleEvent =
                   (debugger_free_closure dbg) $ \pclosure -> do
             if pclosure == nullPtr
               then return Nothing
-              else do (cu,ss,dies,breakpoints) <- readIORef ref
+              else do (cu,ss,dies,names,action) <- readIORef ref
                       info_ptr <- (#peek StgClosure, header.info) pclosure
                       let name =
-                            case Map.lookup info_ptr breakpoints of
+                            case Map.lookup info_ptr names of
                               Nothing       -> 's':'c':':':showHex info_ptr ""
                               Just (name,_) -> name
                       itbl <- peekItbl (pclosure `plusPtr` (- (#size StgInfoTable)))
@@ -158,10 +183,10 @@ startDebugger args handleEvent =
                       (debugger_free_closure dbg) $ \pclosure -> do
                 if pclosure == nullPtr
                   then return Nothing
-                  else do (cu,ss,dies,breakpoints) <- readIORef ref
+                  else do (cu,ss,dies,names,action) <- readIORef ref
                           info_ptr <- (#peek StgClosure, header.info) pclosure
                           let name =
-                                case Map.lookup info_ptr breakpoints of
+                                case Map.lookup info_ptr names of
                                   Nothing       -> 's':'c':':':showHex info_ptr ""
                                   Just (name,_) -> name
                           itbl <- peekItbl (pclosure `plusPtr` (- (#size StgInfoTable)))
@@ -169,7 +194,7 @@ startDebugger args handleEvent =
                           return (Just (name,clo))
 
         findFunction fpath span = do
-          (cu,ss,dies,breakpoints) <- readIORef ref
+          (cu,ss,dies,names,action) <- readIORef ref
           return (filterRoots
                     [(name,span) | (name,(cu,ss)) <- Map.toList dies
                                  , cu == fpath
@@ -356,6 +381,9 @@ startDebugger args handleEvent =
 
 #include "debugger.h"
 
+bitmap_SIZE_MASK  = 0x3f
+bitmap_BITS_SHIFT = 6
+
 data DebuggerCallbacks
 
 foreign import ccall debugger_execv :: CString -> Ptr CString ->
@@ -364,6 +392,7 @@ foreign import ccall debugger_execv :: CString -> Ptr CString ->
 foreign import ccall debugger_copy_closure :: Ptr Debugger -> HeapPtr -> IO (Ptr ())
 foreign import ccall debugger_copy_stackframe :: Ptr Debugger -> Ptr CSize -> IO (Ptr ())
 foreign import ccall debugger_free_closure :: Ptr Debugger -> Ptr () -> IO ()
+foreign import ccall debugger_poke :: Ptr Debugger -> (#type GElf_Addr) -> Word8 -> IO ()
 
 type Wrapper a = a -> IO (FunPtr a)
 

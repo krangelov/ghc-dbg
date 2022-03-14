@@ -24,4 +24,6 @@ StgClosure *debugger_copy_stackframe(Debugger *debugger, size_t *offset);
 
 void debugger_free_closure(Debugger *debugger, StgClosure *closure);
 
+void debugger_poke(Debugger* debugger, GElf_Addr addr, uint8_t byte);
+
 #endif

@@ -271,7 +271,6 @@ StgWord *get_args(Debugger *debugger,
     *p_n_args = 0;
 
     GElf_Addr closure_ptr = 0;
-    GElf_Addr fst_arg_ptr = 0;
 
     int n_args = 0;
     switch (infoTable->type) {
@@ -356,8 +355,8 @@ StgWord *get_args(Debugger *debugger,
     case RET_BIG:
     case RET_FUN:
     case UPDATE_FRAME:
-        // The stack for return frames doesn't always contain info ptr
         n_args = 1;
+        // The stack for return frames doesn't always contain info ptr
         ptrace(PTRACE_POKEDATA, debugger->child, regs->rbp, regs->rip);
         break;
     default:
@@ -586,17 +585,28 @@ int debugger_execv(char *pathname, char *const argv[],
                 debugger.rbp = regs.rbp;
                 StgWord *args = get_args(&debugger, infoTable, &regs, &n_args);
 
+                int res;
                 uint8_t save_byte;
-                if (state == 2 || debugger.callbacks->breakpoint_hit(&debugger, regs.rip, n_args, args, &save_byte)) {
+                if (state == 2 || (res = debugger.callbacks->breakpoint_hit(&debugger, regs.rip, n_args, args, &save_byte)) != 0) {
+                    if (res > 2) {
+                        ptrace(PTRACE_KILL, debugger.child, 0, NULL);
+                        break;
+                    }
+
                     *((long*) &int3_buf) =
                         ptrace(PTRACE_PEEKDATA, debugger.child, regs.rip, NULL);
                     int3_buf[0] = save_byte;
                     ptrace(PTRACE_POKEDATA, debugger.child, regs.rip, *((void**) &int3_buf));
 
                     ptrace(PTRACE_SETREGS, debugger.child, NULL, &regs);
-                    ptrace(PTRACE_SINGLESTEP, debugger.child, NULL, NULL);
 
-                    state = 3;
+                    if (res == 1) {
+                        ptrace(PTRACE_SINGLESTEP, debugger.child, NULL, NULL);
+                        state = 3;
+                    } else {
+                        ptrace(PTRACE_CONT, debugger.child, NULL, NULL);
+                        state = 1;
+                    }
                 } else {
                     ptrace(PTRACE_CONT, debugger.child, NULL, NULL);
                 }
@@ -760,4 +770,13 @@ void debugger_free_closure(Debugger *debugger, StgClosure *closure)
     if (closure == NULL)
         return;
     free(((char*) closure) - INFO_TABLE_MAX_SIZE);
+}
+
+void debugger_poke(Debugger* debugger, GElf_Addr addr, uint8_t byte)
+{
+    uint8_t int3_buf[sizeof(long)];
+    *((long*) &int3_buf) =
+        ptrace(PTRACE_PEEKDATA, debugger->child, addr, NULL);
+    int3_buf[0] = byte;
+    ptrace(PTRACE_POKEDATA, debugger->child, addr, *((void**) &int3_buf));
 }
