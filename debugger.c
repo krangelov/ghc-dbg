@@ -348,6 +348,8 @@ StgWord *get_args(Debugger *debugger,
     case IND:
     case IND_STATIC:
     case BLACKHOLE:
+    case CATCH_FRAME:
+    case STOP_FRAME:
         n_args = 1;
         break;
     case RET_BCO:

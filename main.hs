@@ -3,19 +3,257 @@ import System.Environment
 import Control.Monad
 import GHC.Exts.Heap
 import GHC.Exts.Heap.InfoTable
+import Numeric (showHex)
 import HDB
+import Text.Encoding.Z
+import Data.IORef
+import Data.List
+import Data.Char
+import Data.Maybe
+import qualified Data.Map as Map
 
 main = do
   args <- getArgs
+  opts_ref <- newIORef (False,False)
   startDebugger args $ \dbg name srcloc args -> do
-    putStrLn (name++" "++show args)
-    print srcloc
+    (ptrs,t) <- peekHeapState dbg name args
+    opts <- readIORef opts_ref
+    putStrLn (renderHeapTree 1 opts t)
+    forM_ (Map.toList ptrs) $ \(ptr,t) ->
+      putStrLn (showHeapPtr ptr++" = "++renderHeapTree 0 opts t)
     case srcloc of
       Just (fpath,spans) -> do ls <- fmap lines $ readFile fpath
                                mapM_ (printSpan ls) spans
       Nothing            -> return ()
-    loop dbg
-    return Step
+    (opts,res) <- loop dbg opts
+    writeIORef opts_ref opts
+    return res
+
+data HeapTree
+  = HP HeapPtr                      -- ^ pointer to a shared node
+  | HC String (GenClosure HeapTree) -- ^ heap closure
+  | HF HeapTree [HeapTree]          -- ^ a stack frame
+  | HE HeapTree                     -- ^ what is beeing executed now
+  deriving Show
+
+peekHeapState dbg name args = do
+  (env,t) <- fixIO $ \res -> do
+                        let out = fst res
+                            env = Map.empty
+                        (env,t:args) <- mapAccumM (peekHeapTree out) env args
+                        stk <- getStack dbg
+                        case stk of
+                          ((name',clo):stk) | name==name' -> do (env,clo) <- down out env clo
+                                                                appStack out env stk (HE (HF (HC name clo) [HF t args]))
+                          _                               -> appStack out env stk (HE (HF t args))
+  let ptrs = fmap snd (Map.filter (\(c,_) -> c > 1) env)
+  return (ptrs,t)
+  where
+    peekHeapTree out env ptr =
+      case Map.lookup ptr env of
+        Just (c,t) -> return (Map.insert ptr (c+1,t) env, HP ptr)
+        Nothing    -> do mb_clo <- peekClosure dbg ptr
+                         case mb_clo of
+                           Nothing         -> return (env, HP ptr)
+                           Just (name,clo) -> do let env1 = Map.insert ptr (1,HP ptr) env
+                                                 (env2,clo) <- down out env1 clo
+                                                 let env3 = Map.adjust (\(c,_) -> (c,HC name clo)) ptr env2
+                                                     res  = case Map.lookup ptr out of
+                                                              Just (1,t) -> t
+                                                              _          -> HP ptr
+                                                 return (env3,res)
+
+    appStack out env []               t = return (env,t)
+    appStack out env ((name,clo):stk) t = do
+      (env,clo) <- down out env clo
+      appStack out env stk (HF (HC name clo) [t])
+
+    down out env clo@(IntClosure info v) = return (env, IntClosure info v)
+    down out env clo@(Int64Closure info v) = return (env, Int64Closure info v)
+    down out env clo@(WordClosure info v) = return (env, WordClosure info v)
+    down out env clo@(Word64Closure info v) = return (env, Word64Closure info v)
+    down out env clo@(DoubleClosure info v) = return (env, DoubleClosure info v)
+    down out env clo
+      | elem typ [CONSTR,     CONSTR_0_1, CONSTR_0_2,
+                  CONSTR_1_1, CONSTR_2_0, CONSTR_1_0,
+                  FUN,        FUN_0_1,    FUN_0_2,
+                  FUN_1_1,    FUN_2_0,    FUN_1_0,
+                  THUNK,      THUNK_0_1,  THUNK_0_2,
+                  THUNK_1_1,  THUNK_2_0,  THUNK_1_0,
+                  THUNK_STATIC] =
+          do (env2,args) <- mapAccumM (peekHeapTree out) env (ptrArgs clo)
+             return (env2, clo{ptrArgs=args})
+      | elem typ [AP, PAP] =
+          do (env2,fun) <- peekHeapTree out env (fun clo)
+             (env3,pld) <- mapAccumM (peekHeapTree out) env2 (payload clo)
+             return (env3, clo{fun=fun, payload=pld})
+      | elem typ [IND, IND_STATIC, BLACKHOLE] =
+          do (env2,ind) <- peekHeapTree out env (indirectee clo)
+             return (env2, clo{indirectee=ind})
+      | elem typ [MVAR_CLEAN, MVAR_DIRTY] =
+          do (env2,val) <- peekHeapTree out env (value clo)
+             return (env2, clo{queueHead=HP (queueHead clo)
+                              ,queueTail=HP (queueTail clo)
+                              ,value=val
+                              })
+      | elem typ [MUT_VAR_CLEAN, MUT_VAR_DIRTY] =
+          do (env2,val) <- peekHeapTree out env (var clo)
+             return (env2, clo{var=val})
+      | elem typ [ARR_WORDS] =
+          do return (env, clo{arrWords=arrWords clo})
+      | elem typ [MUT_ARR_PTRS_CLEAN, MUT_ARR_PTRS_DIRTY,
+                  MUT_ARR_PTRS_FROZEN_CLEAN, MUT_ARR_PTRS_FROZEN_DIRTY]=
+          do (env2,elems) <- mapAccumM (peekHeapTree out) env (mccPayload clo)
+             return (env2, clo{mccPayload=elems})
+      | typ == INVALID_OBJECT =
+          do return (env, UnsupportedClosure (info clo))
+      | otherwise =
+          do (env2,args) <- mapAccumM (peekHeapTree out) env (hvalues clo)
+             return (env2, clo{hvalues=args})
+      where
+        typ  = tipe (info clo)
+
+mapAccumM :: Monad m => (a -> b -> m (a, c)) -> a -> [b] -> m (a, [c])
+mapAccumM _ s []       = return (s, [])
+mapAccumM f s (x : xs) = f s x >>= (\(s', x') -> mapAccumM f s' xs >>=
+                                     (\(s'', xs') -> return (s'', x' : xs')))
+
+renderHeapTree d opts (HP ptr) = showHeapPtr ptr
+renderHeapTree d opts (HC name (IntClosure _ v)) = show v
+renderHeapTree d opts (HC name (Int64Closure _ v)) = show v
+renderHeapTree d opts (HC name (WordClosure _ v)) = show v
+renderHeapTree d opts (HC name (Word64Closure _ v)) = show v
+renderHeapTree d opts (HC name (DoubleClosure _ v)) = show v
+renderHeapTree d opts (HC name clo) =
+  case tipe (info clo) of
+    CONSTR        -> renderData name clo
+    CONSTR_0_1
+      | name == "base_GHCziInt_I32zh_con_info"
+                  -> unwords (map show (dataArgs clo))
+      | name == "ghczmprim_GHCziTypes_Czh_con_info"
+                  -> unwords (map (show . chr . fromIntegral) (dataArgs clo))
+      | otherwise -> renderData name clo
+    CONSTR_0_2    -> renderData name clo
+    CONSTR_1_1    -> renderData name clo
+    CONSTR_2_0
+      | name == "ghczmprim_GHCziTuple_Z2T_con_info"
+                  -> let pargs = map (renderHeapTree 0 opts) (ptrArgs clo)
+                     in "("++intercalate "," pargs++")"
+      | otherwise -> renderData name clo
+    CONSTR_1_0    -> renderData name clo
+    CONSTR_NOCAF  -> renderOther name clo
+    FUN           -> renderData name clo
+    FUN_1_0       -> renderData name clo
+    FUN_0_1       -> renderData name clo
+    FUN_2_0       -> renderData name clo
+    FUN_1_1       -> renderData name clo
+    FUN_0_2       -> renderData name clo
+    FUN_STATIC    -> showName opts name
+    THUNK         -> renderData name clo
+    THUNK_1_0     -> renderData name clo
+    THUNK_0_1     -> renderData name clo
+    THUNK_2_0     -> renderData name clo
+    THUNK_1_1     -> renderData name clo
+    THUNK_0_2     -> renderData name clo
+    THUNK_STATIC  -> showName opts name
+    AP            -> let s  = renderHeapTree 1 opts (fun clo)
+                         ss = map (renderHeapTree 1 opts) (payload clo)
+                     in apply d s ss
+    PAP           -> let s  = renderHeapTree 1 opts (fun clo)
+                         ss = map (renderHeapTree 1 opts) (payload clo)
+                     in apply d s ss
+    IND           -> renderHeapTree d opts (indirectee clo)
+    IND_STATIC    -> renderHeapTree d opts (indirectee clo)
+    BLACKHOLE     -> renderHeapTree d opts (indirectee clo)
+    MVAR_CLEAN    -> renderMVar clo
+    MVAR_DIRTY    -> renderMVar clo
+    MUT_VAR_CLEAN -> renderMutVar clo
+    MUT_VAR_DIRTY -> renderMutVar clo
+    ARR_WORDS     -> "<ARR_WORDS "++unwords (map show (arrWords clo))++">"
+    MUT_ARR_PTRS_CLEAN -> renderMutArray clo
+    MUT_ARR_PTRS_DIRTY -> renderMutArray clo
+    MUT_ARR_PTRS_FROZEN_CLEAN -> renderMutArray clo
+    MUT_ARR_PTRS_FROZEN_DIRTY -> renderMutArray clo
+    UPDATE_FRAME  -> let pargs = map (renderHeapTree 1 opts) (hvalues clo)
+                     in ("<Update "++unwords pargs++">")
+    CATCH_FRAME   -> let pargs = map (renderHeapTree 1 opts) (hvalues clo)
+                     in ("<Catch "++unwords (map show (rawWords clo)++pargs)++">")
+    STOP_FRAME    -> renderOther name clo
+    WEAK          -> let key:value:_ = rawWords clo
+                         pargs = map (renderHeapTree 1 opts) (hvalues clo)
+                     in apply d "Weak#" (pargs++[show key,show value])
+    RET_SMALL     -> renderOther name clo
+    TSO           -> "<TSO>"
+    _             -> show (name,clo)
+  where
+    renderData name clo =
+       let pargs = map (renderHeapTree 1 opts) (ptrArgs clo)
+           dargs = map show (dataArgs clo)
+       in apply d (showName opts name) (pargs ++ dargs)
+
+    renderOther name clo =
+       let pargs = map (renderHeapTree 1 opts) (hvalues clo)
+           dargs = map show (rawWords clo)
+       in apply d (showName opts name) (pargs ++ dargs)
+
+    renderMVar clo =
+      let s = renderHeapTree 1 opts (value clo)
+      in "<MVAR "++s++">"
+
+    renderMutVar clo =
+      let s = renderHeapTree 1 opts (var clo)
+      in "<MUT_VAR "++s++">"
+
+    renderMutArray clo =
+      let elems = map (renderHeapTree 1 opts) (mccPayload clo)
+      in "<MUT_ARR "++unwords elems++">"
+renderHeapTree d opts (HF t ts) =
+  apply d (renderHeapTree 1 opts t) (map (renderHeapTree 1 opts) ts)
+renderHeapTree d opts (HE t) =
+  "\ESC[30;47m" ++ renderHeapTree 1 opts t ++ "\ESC[39;49m"
+
+
+showHeapPtr ptr = '#':showHex ptr ""
+
+showName (show_pkg,show_mod) name
+  | name == "ZCMain_main_info" = ":Main_main_info"
+  | take 3 name == "sc:"       = name
+  | take 4 name == "stg_"      = reverse (drop 5 rname)
+  | otherwise                  = reconstruct (reverse rname)
+  where
+    rname = reverse name
+
+    reconstruct s
+      | s1 == "info"   = x1
+      | s2 == "info"   = (if show_mod
+                            then zDecodeString x1++"."
+                            else "")++
+                         (zDecodeString x2)
+      | otherwise      = (if show_pkg
+                            then zDecodeString x1++":"
+                            else "")++
+                         (if show_mod
+                            then zDecodeString x2++"."
+                            else "")++
+                         (zDecodeString x3)
+      where
+        (x1,'_':s1) = break (=='_') s
+        (x2,'_':s2) = break (=='_') s1
+        (x3,_     ) = break (=='_') s2
+
+apply d s [] = s
+apply d s ss
+  | d > 0     = "("++s2++")"
+  | otherwise = s2
+  where
+    s2 =
+      case ss of
+        [s1,s2] | isOperator s -> s1++" "++s++" "++s2
+        _                      -> unwords (s:ss)
+
+    isOperator s = not (any (flip elem chars) s)
+      where
+        chars = ['a'..'z']++['A'..'Z']++['0'..'9']++['_']
 
 printSpan ls (sl,sc,el,ec) = do
   let ls' = case take (el-sl+1) (drop (sl-1) ls) of
@@ -30,17 +268,18 @@ printSpan ls (sl,sc,el,ec) = do
                            [ys ++ "\ESC[39;49m" ++ zs]
   mapM_ putStrLn ls'
 
-loop dbg = do
+loop dbg opts = do
   hPutStr stdout ">>> "
   hFlush stdout
   s <- getLine
   case words s of
-    []          -> return ()
-    ["print",w] -> do
+    []              -> return (opts,Step)
+    ["step"]        -> return (opts,Step)
+    ["stop"]        -> return (opts,Stop)
+    ("continue":ws) -> return (opts,Continue ws)
+    ["print",w]     -> do
         clo <- peekClosure dbg (read w)
         putStrLn (show clo)
-        loop dbg
-    ["backtrace"]->do
-        stk <- getStack dbg
-        mapM_ print stk
-        loop dbg
+        loop dbg opts
+    _ -> do putStrLn "Unknown command"
+            loop dbg opts
