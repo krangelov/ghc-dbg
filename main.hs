@@ -20,8 +20,8 @@ main = do
   startDebugger args $ \dbg name srcloc args -> do
     (ptrs,t) <- peekHeapState dbg name args
     opts <- readIORef opts_ref
-    let doc = renderHeapTree 1 opts t $$
-              vcat (map (\(ptr,t) -> renderHeapPtr ptr <+> char '=' <+> renderHeapTree 0 opts t)
+    let doc = ppHeapTree 1 opts t $$
+              vcat (map (\(ptr,t) -> ppHeapPtr ptr <+> char '=' <+> ppHeapTree 0 opts t)
                    (Map.toList ptrs))
     putStrLn (ansiRender doc)
     case srcloc of
@@ -130,101 +130,100 @@ ansiRender d =
   where
     (s,spans) = renderSpans d
 
-renderHeapTree d opts (HP ptr) = renderHeapPtr ptr
-renderHeapTree d opts (HC name (IntClosure _ v)) = int v
-renderHeapTree d opts (HC name (Int64Closure _ v)) = integer (fromIntegral v)
-renderHeapTree d opts (HC name (WordClosure _ v)) = integer (fromIntegral v)
-renderHeapTree d opts (HC name (Word64Closure _ v)) = integer (fromIntegral v)
-renderHeapTree d opts (HC name (DoubleClosure _ v)) = double v
-renderHeapTree d opts (HC name clo) =
+ppHeapTree d opts (HP ptr) = ppHeapPtr ptr
+ppHeapTree d opts (HC name (IntClosure _ v)) = int v
+ppHeapTree d opts (HC name (Int64Closure _ v)) = integer (fromIntegral v)
+ppHeapTree d opts (HC name (WordClosure _ v)) = integer (fromIntegral v)
+ppHeapTree d opts (HC name (Word64Closure _ v)) = integer (fromIntegral v)
+ppHeapTree d opts (HC name (DoubleClosure _ v)) = double v
+ppHeapTree d opts (HC name clo) =
   case tipe (info clo) of
-    CONSTR        -> renderData name clo
+    CONSTR        -> ppData name clo
     CONSTR_0_1
       | name == "base_GHCziInt_I32zh_con_info"
                   -> hsep (map (integer . fromIntegral) (dataArgs clo))
       | name == "ghczmprim_GHCziTypes_Czh_con_info"
                   -> hsep (map (text . show . chr . fromIntegral) (dataArgs clo))
-      | otherwise -> renderData name clo
-    CONSTR_0_2    -> renderData name clo
-    CONSTR_1_1    -> renderData name clo
+      | otherwise -> ppData name clo
+    CONSTR_0_2    -> ppData name clo
+    CONSTR_1_1    -> ppData name clo
     CONSTR_2_0
       | name == "ghczmprim_GHCziTuple_Z2T_con_info"
-                  -> let pargs = map (renderHeapTree 0 opts) (ptrArgs clo)
+                  -> let pargs = map (ppHeapTree 0 opts) (ptrArgs clo)
                      in parens (sep (punctuate comma pargs))
-      | otherwise -> renderData name clo
-    CONSTR_1_0    -> renderData name clo
-    CONSTR_NOCAF  -> renderOther name clo
-    FUN           -> renderData name clo
-    FUN_1_0       -> renderData name clo
-    FUN_0_1       -> renderData name clo
-    FUN_2_0       -> renderData name clo
-    FUN_1_1       -> renderData name clo
-    FUN_0_2       -> renderData name clo
+      | otherwise -> ppData name clo
+    CONSTR_1_0    -> ppData name clo
+    CONSTR_NOCAF  -> ppOther name clo
+    FUN           -> ppData name clo
+    FUN_1_0       -> ppData name clo
+    FUN_0_1       -> ppData name clo
+    FUN_2_0       -> ppData name clo
+    FUN_1_1       -> ppData name clo
+    FUN_0_2       -> ppData name clo
     FUN_STATIC    -> text (showName opts name)
-    THUNK         -> renderData name clo
-    THUNK_1_0     -> renderData name clo
-    THUNK_0_1     -> renderData name clo
-    THUNK_2_0     -> renderData name clo
-    THUNK_1_1     -> renderData name clo
-    THUNK_0_2     -> renderData name clo
+    THUNK         -> ppData name clo
+    THUNK_1_0     -> ppData name clo
+    THUNK_0_1     -> ppData name clo
+    THUNK_2_0     -> ppData name clo
+    THUNK_1_1     -> ppData name clo
+    THUNK_0_2     -> ppData name clo
     THUNK_STATIC  -> text (showName opts name)
-    AP            -> let s  = renderHeapTree 1 opts (fun clo)
-                         ss = map (renderHeapTree 1 opts) (payload clo)
+    AP            -> let s  = ppHeapTree 1 opts (fun clo)
+                         ss = map (ppHeapTree 1 opts) (payload clo)
                      in apply' d s ss
-    PAP           -> let s  = renderHeapTree 1 opts (fun clo)
-                         ss = map (renderHeapTree 1 opts) (payload clo)
+    PAP           -> let s  = ppHeapTree 1 opts (fun clo)
+                         ss = map (ppHeapTree 1 opts) (payload clo)
                      in apply' d s ss
-    IND           -> renderHeapTree d opts (indirectee clo)
-    IND_STATIC    -> renderHeapTree d opts (indirectee clo)
-    BLACKHOLE     -> renderHeapTree d opts (indirectee clo)
-    MVAR_CLEAN    -> renderMVar clo
-    MVAR_DIRTY    -> renderMVar clo
-    MUT_VAR_CLEAN -> renderMutVar clo
-    MUT_VAR_DIRTY -> renderMutVar clo
+    IND           -> ppHeapTree d opts (indirectee clo)
+    IND_STATIC    -> ppHeapTree d opts (indirectee clo)
+    BLACKHOLE     -> ppHeapTree d opts (indirectee clo)
+    MVAR_CLEAN    -> ppMVar clo
+    MVAR_DIRTY    -> ppMVar clo
+    MUT_VAR_CLEAN -> ppMutVar clo
+    MUT_VAR_DIRTY -> ppMutVar clo
     ARR_WORDS     -> text "<ARR_WORDS" <+> sep (map (integer . fromIntegral) (arrWords clo)) <> char '>'
-    MUT_ARR_PTRS_CLEAN -> renderMutArray clo
-    MUT_ARR_PTRS_DIRTY -> renderMutArray clo
-    MUT_ARR_PTRS_FROZEN_CLEAN -> renderMutArray clo
-    MUT_ARR_PTRS_FROZEN_DIRTY -> renderMutArray clo
-    UPDATE_FRAME  -> let pargs = map (renderHeapTree 1 opts) (hvalues clo)
+    MUT_ARR_PTRS_CLEAN -> ppMutArray clo
+    MUT_ARR_PTRS_DIRTY -> ppMutArray clo
+    MUT_ARR_PTRS_FROZEN_CLEAN -> ppMutArray clo
+    MUT_ARR_PTRS_FROZEN_DIRTY -> ppMutArray clo
+    UPDATE_FRAME  -> let pargs = map (ppHeapTree 1 opts) (hvalues clo)
                      in (text "<Update" <+> sep pargs <> char '>')
-    CATCH_FRAME   -> let pargs = map (renderHeapTree 1 opts) (hvalues clo)
+    CATCH_FRAME   -> let pargs = map (ppHeapTree 1 opts) (hvalues clo)
                      in (text "<Catch" <+> sep (map (integer . fromIntegral) (rawWords clo)++pargs) <> char '>')
-    STOP_FRAME    -> renderOther name clo
+    STOP_FRAME    -> ppOther name clo
     WEAK          -> let key:value:_ = rawWords clo
-                         pargs = map (renderHeapTree 1 opts) (hvalues clo)
-                     in apply d "Weak#" (pargs++[renderHeapPtr key,renderHeapPtr value])
-    RET_SMALL     -> renderOther name clo
+                         pargs = map (ppHeapTree 1 opts) (hvalues clo)
+                     in apply d "Weak#" (pargs++[ppHeapPtr key,ppHeapPtr value])
+    RET_SMALL     -> ppOther name clo
     TSO           -> text "<TSO>"
   where
-    renderData name clo =
-       let pargs = map (renderHeapTree 1 opts) (ptrArgs clo)
+    ppData name clo =
+       let pargs = map (ppHeapTree 1 opts) (ptrArgs clo)
            dargs = map (integer . fromIntegral) (dataArgs clo)
        in apply d (showName opts name) (pargs ++ dargs)
 
-    renderOther name clo =
-       let pargs = map (renderHeapTree 1 opts) (hvalues clo)
+    ppOther name clo =
+       let pargs = map (ppHeapTree 1 opts) (hvalues clo)
            dargs = map (integer . fromIntegral) (rawWords clo)
        in apply d (showName opts name) (pargs ++ dargs)
 
-    renderMVar clo =
-      let s = renderHeapTree 1 opts (value clo)
+    ppMVar clo =
+      let s = ppHeapTree 1 opts (value clo)
       in text "<MVAR" <+> s <> char '>'
 
-    renderMutVar clo =
-      let s = renderHeapTree 1 opts (var clo)
+    ppMutVar clo =
+      let s = ppHeapTree 1 opts (var clo)
       in text "<MUT_VAR" <+> s <> char '>'
 
-    renderMutArray clo =
-      let elems = map (renderHeapTree 1 opts) (mccPayload clo)
+    ppMutArray clo =
+      let elems = map (ppHeapTree 1 opts) (mccPayload clo)
       in text "<MUT_ARR" <+> sep elems <> char '>'
-renderHeapTree d opts (HF t ts) =
-  apply' d (renderHeapTree 1 opts t) (map (renderHeapTree 1 opts) ts)
-renderHeapTree d opts (HE t) =
-  annotate () (renderHeapTree 1 opts t)
+ppHeapTree d opts (HF t ts) =
+  apply' d (ppHeapTree 1 opts t) (map (ppHeapTree 1 opts) ts)
+ppHeapTree d opts (HE t) =
+  annotate () (ppHeapTree 1 opts t)
 
-
-renderHeapPtr ptr = char '#' <> text (showHex ptr "")
+ppHeapPtr ptr = char '#' <> text (showHex ptr "")
 
 showName (show_pkg,show_mod) name
   | name == "ZCMain_main_info" = ":Main_main_info"
