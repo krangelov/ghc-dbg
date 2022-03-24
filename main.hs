@@ -1,3 +1,4 @@
+import Prelude hiding ((<>))
 import System.IO
 import System.Environment
 import Control.Monad
@@ -6,6 +7,7 @@ import GHC.Exts.Heap.InfoTable
 import Numeric (showHex)
 import HDB
 import Text.Encoding.Z
+import Text.PrettyPrint.Annotated
 import Data.IORef
 import Data.List
 import Data.Char
@@ -18,9 +20,10 @@ main = do
   startDebugger args $ \dbg name srcloc args -> do
     (ptrs,t) <- peekHeapState dbg name args
     opts <- readIORef opts_ref
-    putStrLn (renderHeapTree 1 opts t)
-    forM_ (Map.toList ptrs) $ \(ptr,t) ->
-      putStrLn (showHeapPtr ptr++" = "++renderHeapTree 0 opts t)
+    let doc = renderHeapTree 1 opts t $$
+              vcat (map (\(ptr,t) -> renderHeapPtr ptr <+> char '=' <+> renderHeapTree 0 opts t)
+                   (Map.toList ptrs))
+    putStrLn (ansiRender doc)
     case srcloc of
       Just (fpath,spans) -> do ls <- fmap lines $ readFile fpath
                                mapM_ (printSpan ls) spans
@@ -118,27 +121,36 @@ mapAccumM _ s []       = return (s, [])
 mapAccumM f s (x : xs) = f s x >>= (\(s', x') -> mapAccumM f s' xs >>=
                                      (\(s'', xs') -> return (s'', x' : xs')))
 
-renderHeapTree d opts (HP ptr) = showHeapPtr ptr
-renderHeapTree d opts (HC name (IntClosure _ v)) = show v
-renderHeapTree d opts (HC name (Int64Closure _ v)) = show v
-renderHeapTree d opts (HC name (WordClosure _ v)) = show v
-renderHeapTree d opts (HC name (Word64Closure _ v)) = show v
-renderHeapTree d opts (HC name (DoubleClosure _ v)) = show v
+ansiRender d =
+  case spans of
+    [Span start len _] -> let (s1,s') = splitAt start s
+                              (s2,s3) = splitAt len s'
+                          in s1 ++ "\ESC[32;40m" ++ s2 ++ "\ESC[39;49m" ++ s3
+    _                  -> s
+  where
+    (s,spans) = renderSpans d
+
+renderHeapTree d opts (HP ptr) = renderHeapPtr ptr
+renderHeapTree d opts (HC name (IntClosure _ v)) = int v
+renderHeapTree d opts (HC name (Int64Closure _ v)) = integer (fromIntegral v)
+renderHeapTree d opts (HC name (WordClosure _ v)) = integer (fromIntegral v)
+renderHeapTree d opts (HC name (Word64Closure _ v)) = integer (fromIntegral v)
+renderHeapTree d opts (HC name (DoubleClosure _ v)) = double v
 renderHeapTree d opts (HC name clo) =
   case tipe (info clo) of
     CONSTR        -> renderData name clo
     CONSTR_0_1
       | name == "base_GHCziInt_I32zh_con_info"
-                  -> unwords (map show (dataArgs clo))
+                  -> hsep (map (integer . fromIntegral) (dataArgs clo))
       | name == "ghczmprim_GHCziTypes_Czh_con_info"
-                  -> unwords (map (show . chr . fromIntegral) (dataArgs clo))
+                  -> hsep (map (text . show . chr . fromIntegral) (dataArgs clo))
       | otherwise -> renderData name clo
     CONSTR_0_2    -> renderData name clo
     CONSTR_1_1    -> renderData name clo
     CONSTR_2_0
       | name == "ghczmprim_GHCziTuple_Z2T_con_info"
                   -> let pargs = map (renderHeapTree 0 opts) (ptrArgs clo)
-                     in "("++intercalate "," pargs++")"
+                     in parens (sep (punctuate comma pargs))
       | otherwise -> renderData name clo
     CONSTR_1_0    -> renderData name clo
     CONSTR_NOCAF  -> renderOther name clo
@@ -148,20 +160,20 @@ renderHeapTree d opts (HC name clo) =
     FUN_2_0       -> renderData name clo
     FUN_1_1       -> renderData name clo
     FUN_0_2       -> renderData name clo
-    FUN_STATIC    -> showName opts name
+    FUN_STATIC    -> text (showName opts name)
     THUNK         -> renderData name clo
     THUNK_1_0     -> renderData name clo
     THUNK_0_1     -> renderData name clo
     THUNK_2_0     -> renderData name clo
     THUNK_1_1     -> renderData name clo
     THUNK_0_2     -> renderData name clo
-    THUNK_STATIC  -> showName opts name
+    THUNK_STATIC  -> text (showName opts name)
     AP            -> let s  = renderHeapTree 1 opts (fun clo)
                          ss = map (renderHeapTree 1 opts) (payload clo)
-                     in apply d s ss
+                     in apply' d s ss
     PAP           -> let s  = renderHeapTree 1 opts (fun clo)
                          ss = map (renderHeapTree 1 opts) (payload clo)
-                     in apply d s ss
+                     in apply' d s ss
     IND           -> renderHeapTree d opts (indirectee clo)
     IND_STATIC    -> renderHeapTree d opts (indirectee clo)
     BLACKHOLE     -> renderHeapTree d opts (indirectee clo)
@@ -169,51 +181,50 @@ renderHeapTree d opts (HC name clo) =
     MVAR_DIRTY    -> renderMVar clo
     MUT_VAR_CLEAN -> renderMutVar clo
     MUT_VAR_DIRTY -> renderMutVar clo
-    ARR_WORDS     -> "<ARR_WORDS "++unwords (map show (arrWords clo))++">"
+    ARR_WORDS     -> text "<ARR_WORDS" <+> sep (map (integer . fromIntegral) (arrWords clo)) <> char '>'
     MUT_ARR_PTRS_CLEAN -> renderMutArray clo
     MUT_ARR_PTRS_DIRTY -> renderMutArray clo
     MUT_ARR_PTRS_FROZEN_CLEAN -> renderMutArray clo
     MUT_ARR_PTRS_FROZEN_DIRTY -> renderMutArray clo
     UPDATE_FRAME  -> let pargs = map (renderHeapTree 1 opts) (hvalues clo)
-                     in ("<Update "++unwords pargs++">")
+                     in (text "<Update" <+> sep pargs <> char '>')
     CATCH_FRAME   -> let pargs = map (renderHeapTree 1 opts) (hvalues clo)
-                     in ("<Catch "++unwords (map show (rawWords clo)++pargs)++">")
+                     in (text "<Catch" <+> sep (map (integer . fromIntegral) (rawWords clo)++pargs) <> char '>')
     STOP_FRAME    -> renderOther name clo
     WEAK          -> let key:value:_ = rawWords clo
                          pargs = map (renderHeapTree 1 opts) (hvalues clo)
-                     in apply d "Weak#" (pargs++[show key,show value])
+                     in apply d "Weak#" (pargs++[renderHeapPtr key,renderHeapPtr value])
     RET_SMALL     -> renderOther name clo
-    TSO           -> "<TSO>"
-    _             -> show (name,clo)
+    TSO           -> text "<TSO>"
   where
     renderData name clo =
        let pargs = map (renderHeapTree 1 opts) (ptrArgs clo)
-           dargs = map show (dataArgs clo)
+           dargs = map (integer . fromIntegral) (dataArgs clo)
        in apply d (showName opts name) (pargs ++ dargs)
 
     renderOther name clo =
        let pargs = map (renderHeapTree 1 opts) (hvalues clo)
-           dargs = map show (rawWords clo)
+           dargs = map (integer . fromIntegral) (rawWords clo)
        in apply d (showName opts name) (pargs ++ dargs)
 
     renderMVar clo =
       let s = renderHeapTree 1 opts (value clo)
-      in "<MVAR "++s++">"
+      in text "<MVAR" <+> s <> char '>'
 
     renderMutVar clo =
       let s = renderHeapTree 1 opts (var clo)
-      in "<MUT_VAR "++s++">"
+      in text "<MUT_VAR" <+> s <> char '>'
 
     renderMutArray clo =
       let elems = map (renderHeapTree 1 opts) (mccPayload clo)
-      in "<MUT_ARR "++unwords elems++">"
+      in text "<MUT_ARR" <+> sep elems <> char '>'
 renderHeapTree d opts (HF t ts) =
-  apply d (renderHeapTree 1 opts t) (map (renderHeapTree 1 opts) ts)
+  apply' d (renderHeapTree 1 opts t) (map (renderHeapTree 1 opts) ts)
 renderHeapTree d opts (HE t) =
-  "\ESC[30;47m" ++ renderHeapTree 1 opts t ++ "\ESC[39;49m"
+  annotate () (renderHeapTree 1 opts t)
 
 
-showHeapPtr ptr = '#':showHex ptr ""
+renderHeapPtr ptr = char '#' <> text (showHex ptr "")
 
 showName (show_pkg,show_mod) name
   | name == "ZCMain_main_info" = ":Main_main_info"
@@ -241,19 +252,26 @@ showName (show_pkg,show_mod) name
         (x2,'_':s2) = break (=='_') s1
         (x3,_     ) = break (=='_') s2
 
-apply d s [] = s
+apply :: Int -> String -> [Doc a] -> Doc a
+apply d s [] = text s
 apply d s ss
-  | d > 0     = "("++s2++")"
+  | d > 0     = parens s2
   | otherwise = s2
   where
     s2 =
       case ss of
-        [s1,s2] | isOperator s -> s1++" "++s++" "++s2
-        _                      -> unwords (s:ss)
+        [s1,s2] | isOperator s -> s1 <+> text s <+> s2
+        _                      -> text s <+> sep ss
 
     isOperator s = not (any (flip elem chars) s)
       where
         chars = ['a'..'z']++['A'..'Z']++['0'..'9']++['_']
+
+apply' :: Int -> Doc a -> [Doc a] -> Doc a
+apply' d s [] = s
+apply' d s ss
+  | d > 0     = parens (s <+> sep ss)
+  | otherwise = (s <+> sep ss)
 
 printSpan ls (sl,sc,el,ec) = do
   let ls' = case take (el-sl+1) (drop (sl-1) ls) of
