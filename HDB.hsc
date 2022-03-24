@@ -238,12 +238,12 @@ startDebugger args handleEvent =
         CONSTR_2_0    -> constrClosure
         CONSTR_1_1    -> constrClosure
         CONSTR_0_2    -> constrClosure
-        FUN           -> thunkClosure FunClosure
-        FUN_1_0       -> thunkClosure FunClosure
-        FUN_0_1       -> thunkClosure FunClosure
-        FUN_2_0       -> thunkClosure FunClosure
-        FUN_1_1       -> thunkClosure FunClosure
-        FUN_0_2       -> thunkClosure FunClosure
+        FUN           -> funClosure FunClosure
+        FUN_1_0       -> funClosure FunClosure
+        FUN_0_1       -> funClosure FunClosure
+        FUN_2_0       -> funClosure FunClosure
+        FUN_1_1       -> funClosure FunClosure
+        FUN_0_2       -> funClosure FunClosure
         THUNK         -> thunkClosure ThunkClosure
         THUNK_1_0     -> thunkClosure ThunkClosure
         THUNK_0_1     -> thunkClosure ThunkClosure
@@ -298,9 +298,13 @@ startDebugger args handleEvent =
           (pkg,modl,name) <- dataConNames pitbl
           return (ConstrClosure itbl ps ws pkg modl name)
 
-        thunkClosure con = do
+        funClosure con = do
           (ps,ws) <- peekContent itbl pclosure
           return (con itbl ps ws)
+
+        thunkClosure con = do
+          (ps,ws) <- peekContent itbl{ptrs=ptrs itbl+1} pclosure
+          return (con itbl (tail ps) ws)
 
         selectorClosure = do
           ([_,p],[]) <- peekContent itbl{ptrs=2} pclosure
