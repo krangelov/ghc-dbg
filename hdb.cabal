@@ -19,7 +19,8 @@ library
                  base,
                  containers
   extra-libraries: dw
-  c-sources: debugger.c 
+  c-sources: debugger.c,
+             debugger.h
   default-language: Haskell2010
   build-tools: hsc2hs
   include-dirs: .
