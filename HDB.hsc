@@ -1,4 +1,4 @@
-module HDB(startDebugger,HeapPtr,Debugger(..),DebuggerAction(..)) where
+module HDB(startDebugger,LinkerName,HeapPtr,Debugger(..),DebuggerAction(..)) where
 
 import Foreign
 import Foreign.C
