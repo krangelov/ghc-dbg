@@ -125,7 +125,7 @@ ansiRender d =
   case spans of
     [Span start len _] -> let (s1,s') = splitAt start s
                               (s2,s3) = splitAt len s'
-                          in s1 ++ "\ESC[32;40m" ++ s2 ++ "\ESC[39;49m" ++ s3
+                          in s1 ++ "\ESC[32;49m" ++ s2 ++ "\ESC[39;49m" ++ s3
     _                  -> s
   where
     (s,spans) = renderSpans d
