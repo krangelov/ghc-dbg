@@ -195,6 +195,7 @@ ppHeapTree d opts (HC name clo) =
                          pargs = map (ppHeapTree 1 opts) (hvalues clo)
                      in apply d "Weak#" (pargs++[ppHeapPtr key,ppHeapPtr value])
     RET_SMALL     -> ppOther name clo
+    RET_FUN       -> ppOther name clo
     TSO           -> text "<TSO>"
   where
     ppData name clo =
