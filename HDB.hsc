@@ -416,6 +416,7 @@ nullaryConstrsSet = Set.fromList
   , "ghczmprim_GHCziTuple_Z2T_con_info"
   , "base_GHCziMaybe_Nothing_con_info"
   , "base_GHCziIOziHandleziTypes_LF_con_info"
+  , "base_GHCziIOziHandleziTypes_CRLF_con_info"
   , "base_GHCziIOziHandleziTypes_BufferListNil_con_info"
   , "base_GHCziIOziHandleziTypes_ClosedHandle"
   , "base_GHCziIOziHandleziTypes_SemiClosedHandle"
