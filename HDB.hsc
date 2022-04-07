@@ -307,6 +307,8 @@ startDebugger args handleEvent =
           | name == "base_GHCziWord_W64zh_con_info" -> do
                          ([],[w]) <- peekContent itbl pclosure
                          return (Word64Closure PWord64 (fromIntegral w))
+          | name == "stg_NO_FINALIZER_info" ->
+                         return (OtherClosure itbl [] [])
           | otherwise                               -> do
                          (ps,ws) <- peekContent itbl pclosure
                          return (OtherClosure itbl ps ws)
@@ -406,8 +408,7 @@ startDebugger args handleEvent =
               return (ps,w:ws)
 
 nullaryConstrsSet = Set.fromList
-  [ "stg_NO_FINALIZER_con_info"
-  , "ghczmprim_GHCziTypes_True_con_info"
+  [ "ghczmprim_GHCziTypes_True_con_info"
   , "ghczmprim_GHCziTypes_False_con_info"
   , "ghczmprim_GHCziTypes_ZMZN_con_info"
   , "ghczmprim_GHCziTypes_LT_con_info"
