@@ -1,12 +1,16 @@
-module HDB(startDebugger,LinkerName,HeapPtr,Debugger(..),DebuggerAction(..)) where
+module HDB(startDebugger,LinkerName,SourceSpan,SourceSpans
+          ,HeapPtr
+          ,Debugger(..),DebuggerAction(..)
+          ) where
 
 import Foreign
 import Foreign.C
 import Foreign.Ptr
 import Control.Exception
+import Numeric (showHex)
 import Data.IORef
 import Data.Bits
-import Numeric (showHex)
+import Data.Containers.ListUtils(nubOrd)
 import qualified Data.Map as Map
 import GHC.Exts.Heap
 import GHC.Exts.Heap.Utils
@@ -20,10 +24,13 @@ data Debugger
   = Debugger {
       peekClosure :: HeapPtr -> IO (Maybe (LinkerName,GenClosure HeapPtr)),
       getStack :: IO [(LinkerName,GenClosure HeapPtr)],
-      findFunction :: FilePath -> (Int,Int,Int,Int) -> IO [LinkerName]
+      getSourceFiles :: IO [FilePath],
+      findFunction :: FilePath -> (Int,Int,Int,Int) -> IO [LinkerName],
+      findSource :: LinkerName -> IO (Maybe SourceSpans)
     }
 
-type SourceSpans = (FilePath,[(Int,Int,Int,Int)])
+type SourceSpan  = (Int,Int,Int,Int)
+type SourceSpans = (FilePath,[SourceSpan])
 
 data DebuggerAction
   = Step
@@ -149,7 +156,8 @@ startDebugger args handleEvent =
         (GT,LT) -> Just LT
         _       -> Nothing
 
-    wrapDebugger ref dbg = Debugger peekC stack findFunction
+    wrapDebugger ref dbg = Debugger peekC stack sourceFiles
+                                    findFunction findSource
       where
         peekC addr =
           bracket (debugger_copy_closure dbg addr)
@@ -196,6 +204,10 @@ startDebugger args handleEvent =
                           clo <- peekClosure name itbl pclosure
                           return (Just (name,clo))
 
+        sourceFiles = do
+          (cu,ss,dies,names,action) <- readIORef ref
+          return (nubOrd [cu | (name,(cu,ss)) <- Map.toList dies])
+
         findFunction fpath span = do
           (cu,ss,dies,names,action) <- readIORef ref
           return (filterRoots
@@ -225,6 +237,9 @@ startDebugger args handleEvent =
                 Just GT -> remove_scope s nss
                 _       -> ns':remove_scope s nss
 
+        findSource name = do
+          (cu,ss,dies,names,action) <- readIORef ref
+          return (Map.lookup name dies)
 
     peekClosure name itbl pclosure =
       case tipe itbl of
