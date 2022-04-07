@@ -12,6 +12,7 @@ import Data.IORef
 import Data.Bits
 import Data.Containers.ListUtils(nubOrd)
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 import GHC.Exts.Heap
 import GHC.Exts.Heap.Utils
 import GHC.Exts.Heap.InfoTable
@@ -249,6 +250,9 @@ startDebugger args handleEvent =
           | name == "ghczmprim_GHCziTypes_Izh_con_info" -> do
                          ([],[w]) <- peekContent itbl pclosure
                          return (IntClosure PInt (fromIntegral w))
+          | Set.member name nullaryConstrsSet
+                      -> do clo <- constrClosure
+                            return clo{dataArgs=[]}
           | otherwise -> constrClosure
         CONSTR_2_0    -> constrClosure
         CONSTR_1_1    -> constrClosure
@@ -400,6 +404,27 @@ startDebugger args handleEvent =
               w <- peek (castPtr ptr)
               (ps,ws) <- peekBitmap (size-1) (bitmap `shiftR` 1) (ptr `plusPtr` (sizeOf (undefined :: Word)))
               return (ps,w:ws)
+
+nullaryConstrsSet = Set.fromList
+  [ "stg_NO_FINALIZER_con_info"
+  , "ghczmprim_GHCziTypes_True_con_info"
+  , "ghczmprim_GHCziTypes_False_con_info"
+  , "ghczmprim_GHCziTypes_ZMZN_con_info"
+  , "ghczmprim_GHCziTypes_LT_con_info"
+  , "ghczmprim_GHCziTypes_EQ_con_info"
+  , "ghczmprim_GHCziTypes_GT_con_info"
+  , "ghczmprim_GHCziTuple_Z2T_con_info"
+  , "base_GHCziMaybe_Nothing_con_info"
+  , "base_GHCziIOziHandleziTypes_LF_con_info"
+  , "base_GHCziIOziHandleziTypes_BufferListNil_con_info"
+  , "base_GHCziIOziHandleziTypes_ClosedHandle"
+  , "base_GHCziIOziHandleziTypes_SemiClosedHandle"
+  , "base_GHCziIOziHandleziTypes_ReadHandle"
+  , "base_GHCziIOziHandleziTypes_WriteHandle_con_info"
+  , "base_GHCziIOziHandleziTypes_AppendHandle"
+  , "base_GHCziIOziHandleziTypes_ReadWriteHandle"
+  , "base_GHCziIOziEncodingziFailure_ErrorOnCodingFailure_con_info"
+  ]
 
 #include "debugger.h"
 
