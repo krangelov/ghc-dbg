@@ -43,39 +43,45 @@ peekHeapState dbg name args = do
   (env,t) <- fixIO $ \res -> do
                         let out = fst res
                             env = Map.empty
-                        (env,t:args) <- mapAccumM (peekHeapTree out) env args
+                        (env,t:args) <- peekHeapArgs out env args
                         stk <- getStack dbg
                         case stk of
-                          ((name',clo):stk) | name==name' -> do (env,clo) <- down out env clo
+                          ((name',clo):stk) | name==name' -> do (env,_,clo) <- down out env clo
                                                                 appStack out env stk (HE (HF (HC name clo) [HF t args]))
                           _                               -> appStack out env stk (HE (HF t args))
-  let ptrs = fmap snd (Map.filter (\(c,_) -> c > 1) env)
+  let ptrs = fmap thd (Map.filter (\(c,zero,_) -> c > 1 && not zero) env)
   return (ptrs,t)
   where
+    thd (_,_,x) = x
+
     peekHeapTree out env ptr =
       case Map.lookup ptr env of
-        Just (c,t) -> return (Map.insert ptr (c+1,t) env, HP ptr)
-        Nothing    -> do mb_clo <- peekClosure dbg ptr
-                         case mb_clo of
-                           Nothing         -> return (env, HP ptr)
-                           Just (name,clo) -> do let env1 = Map.insert ptr (1,HP ptr) env
-                                                 (env2,clo) <- down out env1 clo
-                                                 let env3 = Map.adjust (\(c,_) -> (c,HC name clo)) ptr env2
-                                                     res  = case Map.lookup ptr out of
-                                                              Just (1,t) -> t
-                                                              _          -> HP ptr
-                                                 return (env3,res)
+        Just (c,zero,t)
+                -> let t' | zero      = t
+                          | otherwise = HP ptr
+                   in return (Map.insert ptr (c+1,zero,t) env, zero, t')
+        Nothing -> do mb_clo <- peekClosure dbg ptr
+                      case mb_clo of
+                        Nothing         -> return (env, True, HP ptr)
+                        Just (name,clo) -> do let env1 = Map.insert ptr (1,True,HP ptr) env
+                                              (env2,zero,clo) <- down out env1 clo
+                                              let env3 = Map.adjust (\(c,_,_) -> (c,zero,HC name clo)) ptr env2
+                                                  res  = case Map.lookup ptr out of
+                                                           Just (c,zero,t) | c > 1 && not zero -> HP ptr
+                                                                           | otherwise         -> t
+                                                           Nothing                             -> HP ptr
+                                              return (env3,zero,res)
 
     appStack out env []               t = return (env,t)
     appStack out env ((name,clo):stk) t = do
-      (env,clo) <- down out env clo
+      (env,zero,clo) <- down out env clo
       appStack out env stk (HF (HC name clo) [t])
 
-    down out env clo@(IntClosure info v) = return (env, IntClosure info v)
-    down out env clo@(Int64Closure info v) = return (env, Int64Closure info v)
-    down out env clo@(WordClosure info v) = return (env, WordClosure info v)
-    down out env clo@(Word64Closure info v) = return (env, Word64Closure info v)
-    down out env clo@(DoubleClosure info v) = return (env, DoubleClosure info v)
+    down out env clo@(IntClosure info v) = return (env, True, IntClosure info v)
+    down out env clo@(Int64Closure info v) = return (env, True, Int64Closure info v)
+    down out env clo@(WordClosure info v) = return (env, True, WordClosure info v)
+    down out env clo@(Word64Closure info v) = return (env, True, Word64Closure info v)
+    down out env clo@(DoubleClosure info v) = return (env, True, DoubleClosure info v)
     down out env clo
       | elem typ [CONSTR,     CONSTR_0_1, CONSTR_0_2,
                   CONSTR_1_1, CONSTR_2_0, CONSTR_1_0,
@@ -84,42 +90,46 @@ peekHeapState dbg name args = do
                   THUNK,      THUNK_0_1,  THUNK_0_2,
                   THUNK_1_1,  THUNK_2_0,  THUNK_1_0,
                   THUNK_STATIC] =
-          do (env2,args) <- mapAccumM (peekHeapTree out) env (ptrArgs clo)
-             return (env2, clo{ptrArgs=args})
+          do (env2,args) <- peekHeapArgs out env (ptrArgs clo)
+             let zero = name == "base_GHCziInt_I32zh_con_info" ||
+                        name == "ghczmprim_GHCziTypes_Czh_con_info" ||
+                        null (ptrArgs clo) && null (dataArgs clo)
+             return (env2, zero, clo{ptrArgs=args})
       | elem typ [AP, PAP] =
-          do (env2,fun) <- peekHeapTree out env (fun clo)
-             (env3,pld) <- mapAccumM (peekHeapTree out) env2 (payload clo)
-             return (env3, clo{fun=fun, payload=pld})
+          do (env2,_,fun) <- peekHeapTree out env (fun clo)
+             (env3,pld) <- peekHeapArgs out env2 (payload clo)
+             return (env3, null pld, clo{fun=fun, payload=pld})
       | elem typ [IND, IND_STATIC, BLACKHOLE] =
-          do (env2,ind) <- peekHeapTree out env (indirectee clo)
-             return (env2, clo{indirectee=ind})
+          do (env2,zero,ind) <- peekHeapTree out env (indirectee clo)
+             return (env2,zero,clo{indirectee=ind})
       | elem typ [MVAR_CLEAN, MVAR_DIRTY] =
-          do (env2,val) <- peekHeapTree out env (value clo)
-             return (env2, clo{queueHead=HP (queueHead clo)
-                              ,queueTail=HP (queueTail clo)
-                              ,value=val
-                              })
+          do (env2,_,val) <- peekHeapTree out env (value clo)
+             return (env2, False, clo{queueHead=HP (queueHead clo)
+                                     ,queueTail=HP (queueTail clo)
+                                     ,value=val
+                                     })
       | elem typ [MUT_VAR_CLEAN, MUT_VAR_DIRTY] =
-          do (env2,val) <- peekHeapTree out env (var clo)
-             return (env2, clo{var=val})
+          do (env2,_,val) <- peekHeapTree out env (var clo)
+             return (env2, False, clo{var=val})
       | elem typ [ARR_WORDS] =
-          do return (env, clo{arrWords=arrWords clo})
+          do return (env, False, clo{arrWords=arrWords clo})
       | elem typ [MUT_ARR_PTRS_CLEAN, MUT_ARR_PTRS_DIRTY,
                   MUT_ARR_PTRS_FROZEN_CLEAN, MUT_ARR_PTRS_FROZEN_DIRTY]=
-          do (env2,elems) <- mapAccumM (peekHeapTree out) env (mccPayload clo)
-             return (env2, clo{mccPayload=elems})
+          do (env2,elems) <- peekHeapArgs out env (mccPayload clo)
+             return (env2, False, clo{mccPayload=elems})
       | typ == INVALID_OBJECT =
-          do return (env, UnsupportedClosure (info clo))
+          do return (env, False, UnsupportedClosure (info clo))
       | otherwise =
-          do (env2,args) <- mapAccumM (peekHeapTree out) env (hvalues clo)
-             return (env2, clo{hvalues=args})
+          do (env2,args) <- peekHeapArgs out env (hvalues clo)
+             let zero = null (hvalues clo) && null (rawWords clo)
+             return (env2, zero, clo{hvalues=args})
       where
         typ  = tipe (info clo)
 
-mapAccumM :: Monad m => (a -> b -> m (a, c)) -> a -> [b] -> m (a, [c])
-mapAccumM _ s []       = return (s, [])
-mapAccumM f s (x : xs) = f s x >>= (\(s', x') -> mapAccumM f s' xs >>=
-                                     (\(s'', xs') -> return (s'', x' : xs')))
+    peekHeapArgs out env []       = return (env, [])
+    peekHeapArgs out env (x : xs) = do (env, _, x) <- peekHeapTree out env x
+                                       (env, xs)   <- peekHeapArgs out env xs
+                                       return (env, x : xs)
 
 ansiRender d =
   case spans of
