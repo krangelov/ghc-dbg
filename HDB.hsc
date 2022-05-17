@@ -138,7 +138,7 @@ startDebugger args handleEvent =
         set_breakpoints dbg name names bs = do
           sequence_ [debugger_poke dbg addr 0xCC | (addr, (name, save_byte)) <- Map.toList names
                                                  , not (name `elem` bs)]
-          return (if name `elem` bs then 2 else 1)
+          return (if name `elem` bs then 1 else 2)
 
         remove_breakpoints dbg name names bs = do
           sequence_ [debugger_poke dbg addr save_byte
