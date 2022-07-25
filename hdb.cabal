@@ -19,14 +19,19 @@ library
                  base,
                  containers
   extra-libraries: dw
-  c-sources: debugger.c debugger.h
+  c-sources: debugger.c,
+             debugger.h
   default-language: Haskell2010
   build-tools: hsc2hs
   include-dirs: .
 
-executable hdb-demo
+executable ghc-dbg
   main-is: main.hs
   build-depends: ghc-heap,
                  base,
-                 hdb
+                 containers,
+                 hdb,
+                 zenc,
+                 pretty,
+                 ncurses
   default-language:    Haskell2010

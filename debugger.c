@@ -31,6 +31,7 @@ union StgMaxInfoTable {
   StgFunInfoTable fun;
   StgRetInfoTable ret;
   StgConInfoTable con;
+  StgThunkInfoTable thunk;
 };
 
 #define INFO_TABLE_MAX_SIZE sizeof(union StgMaxInfoTable)
@@ -46,18 +47,18 @@ static
 StgInfoTable *copy_infotable(Debugger *debugger,
                              GElf_Addr addr, char *buf)
 {
-    long *p = (long *) (buf + INFO_TABLE_MAX_SIZE);
+    char *p = buf + INFO_TABLE_MAX_SIZE;
 
     size_t sz = sizeof(StgInfoTable);
 
     int i = 0;
-    while (i < sz / sizeof(long)) {
-        i++;
+    while (i < sz) {
+        i += sizeof(long);
 
-        *(p - i) =
+        *((long *) (p - i)) =
             ptrace(PTRACE_PEEKDATA,
                    debugger->child,
-                   addr - i * sizeof(long),
+                   addr - i,
                    NULL);
         if (errno != 0)
             return NULL;
@@ -91,145 +92,31 @@ StgInfoTable *copy_infotable(Debugger *debugger,
     case CONSTR_NOCAF:
         sz = sizeof(StgConInfoTable);
         break;
-    }
-
-    while (i < sz / sizeof(long)) {
-        i++;
-
-        *(p - i) =
-            ptrace(PTRACE_PEEKDATA,
-                   debugger->child,
-                   addr - i * sizeof(long),
-                   NULL);
-        if (errno != 0)
-            return NULL;
-    }
-
-    int j = sz % sizeof(long);
-    if (j != 0) {
-        long val =
-            ptrace(PTRACE_PEEKDATA,
-                   debugger->child,
-                   addr - i * sizeof(long),
-                   NULL);
-        if (errno != 0)
-            return NULL;
-        memcpy(p-i, &val, j);
-    }
-    return infoTable;
-}
-
-static
-StgWord *get_args(Debugger *debugger,
-                  StgInfoTable *infoTable,
-                  struct user_regs_struct *regs,
-                  size_t *p_n_args)
-{
-    *p_n_args = 0;
-
-    GElf_Addr closure_ptr = 0;
-
-    int n_args = 0;
-    switch (infoTable->type) {
-    case FUN_STATIC: {
-        Dwfl_Module *mod = dwfl_addrmodule(debugger->dwfl, regs->rip);
-        if (mod != NULL) {
-            GElf_Sym sym;
-            GElf_Word shndx;
-            const char *name =
-                dwfl_module_addrsym(mod, regs->rip, &sym, &shndx);
-            size_t len = strlen(name);
-            char *closure_name = alloca(len+6);
-            strcpy(closure_name, name);
-            strcpy(closure_name+len-4, "closure");
-
-            int n_sym = dwfl_module_getsymtab(mod);
-            for (int i = 0; i < n_sym; i++) {
-                Elf *elf;
-                Dwarf_Addr bias;
-
-                const char *curr_name =
-                    dwfl_module_getsym_info(mod, i, &sym, &closure_ptr,
-                                            &shndx,
-                                            &elf, &bias);
-                if (strcmp(curr_name, closure_name) == 0) {
-                    break;
-                }
-            }
-        }
-        // continue
-    }
-    case FUN:
-    case FUN_0_1:
-    case FUN_0_2:
-    case FUN_1_1:
-    case FUN_2_0:
-    case FUN_1_0: {
-        StgFunInfoTable *funInfoTable = (StgFunInfoTable *)
-            (((char *) infoTable) - offsetof(StgFunInfoTable,i));
-        n_args = funInfoTable->f.arity+1;
-        break;
-    }
-    case CONSTR:
-    case CONSTR_0_1:
-    case CONSTR_0_2:
-    case CONSTR_1_1:
-    case CONSTR_2_0:
-    case CONSTR_1_0:
-    case CONSTR_NOCAF:
     case THUNK:
-    case THUNK_0_1:
-    case THUNK_0_2:
-    case THUNK_1_1:
-    case THUNK_2_0:
     case THUNK_1_0:
+    case THUNK_0_1:
+    case THUNK_2_0:
+    case THUNK_1_1:
+    case THUNK_0_2:
     case THUNK_STATIC:
     case THUNK_SELECTOR:
-    case RET_BCO:
-    case RET_SMALL:
-    case RET_BIG:
-    case RET_FUN:
-    case UPDATE_FRAME:
-    case IND:
-    case IND_STATIC:
-    case BLACKHOLE:
-        n_args = 1;
+        sz = sizeof(StgThunkInfoTable);
         break;
-    default:
-        return NULL;
     }
 
-    *p_n_args = n_args;
+    while (i < sz) {
+        i += sizeof(long);
 
-    StgWord *args = malloc(sizeof(StgWord)*n_args);
-    if (args == NULL)
-        return NULL;
-    StgWord *p = args;
-
-    if (n_args > 0) *(p++) = closure_ptr ? closure_ptr : regs->rbx;
-    if (n_args > 1) *(p++) = regs->r14;
-    if (n_args > 2) *(p++) = regs->rsi;
-    if (n_args > 3) *(p++) = regs->rdi;
-    if (n_args > 4) *(p++) = regs->r8;
-    if (n_args > 5) *(p++) = regs->r9;
-    if (n_args > 6) {
-        size_t i = 6;
-        while (i < n_args) {
-            *(p++) =
-                ptrace(PTRACE_PEEKDATA,
-                       debugger->child,
-                       regs->rbp + (i-6) * sizeof(StgWord),
-                       NULL);
-            if (errno != 0) {
-                free(args);
-                return NULL;
-            }
-            i++;
-        }
+        *((long *) (p - i)) =
+            ptrace(PTRACE_PEEKDATA,
+                   debugger->child,
+                   addr - i,
+                   NULL);
+        if (errno != 0)
+            return NULL;
     }
 
-    *p_n_args = n_args;
-    return args;
+    return infoTable;
 }
 
 static uint32_t
@@ -270,8 +157,12 @@ debugger_closure_sizeW(Debugger *debugger,
     case FUN_2_0:
     case CONSTR_2_0:
         return sizeofW(StgHeader) + 2;
+    case RET_SMALL: {
+        StgWord bitmap = infoTable->layout.bitmap;
+        return sizeofW(StgClosure)
+             + BITMAP_SIZE(bitmap) * sizeofW(StgWord);
+    }
     case RET_BCO:
-    case RET_SMALL:
     case RET_BIG:
     case RET_FUN:
         return sizeofW(StgClosure)
@@ -369,6 +260,143 @@ debugger_closure_sizeW(Debugger *debugger,
     default:
         return 0;
     }
+}
+
+static
+StgWord *get_args(Debugger *debugger,
+                  StgInfoTable *infoTable,
+                  struct user_regs_struct *regs,
+                  size_t *p_n_args)
+{
+    *p_n_args = 0;
+
+    GElf_Addr closure_ptr = 0;
+
+    int n_args = 0;
+    switch (infoTable->type) {
+    case FUN_STATIC: {
+        Dwfl_Module *mod = dwfl_addrmodule(debugger->dwfl, regs->rip);
+        if (mod != NULL) {
+            GElf_Sym sym;
+            GElf_Word shndx;
+            const char *name =
+                dwfl_module_addrsym(mod, regs->rip, &sym, &shndx);
+            size_t len = strlen(name);
+            char *closure_name = alloca(len+6);
+            strcpy(closure_name, name);
+            strcpy(closure_name+len-4, "closure");
+
+            int n_sym = dwfl_module_getsymtab(mod);
+            for (int i = 0; i < n_sym; i++) {
+                Elf *elf;
+                Dwarf_Addr bias;
+
+                const char *curr_name =
+                    dwfl_module_getsym_info(mod, i, &sym, &closure_ptr,
+                                            &shndx,
+                                            &elf, &bias);
+                if (strcmp(curr_name, closure_name) == 0) {
+                    break;
+                }
+            }
+        }
+        // continue
+    }
+    case FUN:
+    case FUN_0_1:
+    case FUN_0_2:
+    case FUN_1_1:
+    case FUN_2_0:
+    case FUN_1_0: {
+        StgFunInfoTable *funInfoTable = (StgFunInfoTable *)
+            (((char *) infoTable) - offsetof(StgFunInfoTable,i));
+        n_args = 1;
+        switch (funInfoTable->f.fun_type) {
+        case ARG_GEN: n_args += BITMAP_SIZE(funInfoTable->f.b.bitmap); break;
+        case ARG_NONE:                  break;
+        case ARG_N:                     break;
+        case ARG_NN:                    break;
+        case ARG_NNN:                   break;
+        case ARG_P:        n_args += 1; break;
+        case ARG_PP:       n_args += 2; break;
+        case ARG_PPP:      n_args += 3; break;
+        case ARG_PPPP:     n_args += 4; break;
+        case ARG_PPPPP:    n_args += 5; break;
+        case ARG_PPPPPP:   n_args += 6; break;
+        case ARG_PPPPPPP:  n_args += 7; break;
+        case ARG_PPPPPPPP: n_args += 8; break;
+        default:
+            n_args += funInfoTable->f.arity;
+        }
+        break;
+    }
+    case CONSTR:
+    case CONSTR_0_1:
+    case CONSTR_0_2:
+    case CONSTR_1_1:
+    case CONSTR_2_0:
+    case CONSTR_1_0:
+    case CONSTR_NOCAF:
+    case THUNK:
+    case THUNK_0_1:
+    case THUNK_0_2:
+    case THUNK_1_1:
+    case THUNK_2_0:
+    case THUNK_1_0:
+    case THUNK_STATIC:
+    case THUNK_SELECTOR:
+    case IND:
+    case IND_STATIC:
+    case BLACKHOLE:
+    case CATCH_FRAME:
+    case STOP_FRAME:
+        n_args = 1;
+        break;
+    case RET_BCO:
+    case RET_SMALL:
+    case RET_BIG:
+    case RET_FUN:
+    case UPDATE_FRAME:
+        n_args = 1;
+        // The stack for return frames doesn't always contain info ptr
+        ptrace(PTRACE_POKEDATA, debugger->child, regs->rbp, regs->rip);
+        break;
+    default:
+        return NULL;
+    }
+
+    *p_n_args = n_args;
+
+    StgWord *args = malloc(sizeof(StgWord)*n_args);
+    if (args == NULL)
+        return NULL;
+    StgWord *p = args;
+
+    if (n_args > 0) *(p++) = closure_ptr ? closure_ptr : regs->rbx;
+    if (n_args > 1) *(p++) = regs->r14;
+    if (n_args > 2) *(p++) = regs->rsi;
+    if (n_args > 3) *(p++) = regs->rdi;
+    if (n_args > 4) *(p++) = regs->r8;
+    if (n_args > 5) *(p++) = regs->r9;
+    if (n_args > 6) {
+        size_t i = 6;
+        while (i < n_args) {
+            *(p++) =
+                ptrace(PTRACE_PEEKDATA,
+                       debugger->child,
+                       debugger->rbp,
+                       NULL);
+            if (errno != 0) {
+                free(args);
+                return NULL;
+            }
+            debugger->rbp += sizeof(StgWord);
+            i++;
+        }
+    }
+
+    *p_n_args = n_args;
+    return args;
 }
 
 static
@@ -472,13 +500,7 @@ int collect_infos(Dwfl_Module *mod, void ** x,
             int3_buf[0] = 0xCC;
             ptrace(PTRACE_POKEDATA, debugger->child, addr, *((void**) &int3_buf));
 
-            char buf[INFO_TABLE_MAX_SIZE];
-            StgInfoTable *infoTable =
-                copy_infotable(debugger, addr, buf);
-            if (infoTable == NULL)
-                return DWARF_CB_ABORT;
-
-            debugger->callbacks->register_info(name,addr,save_byte,infoTable);
+            debugger->callbacks->register_name(name,addr,save_byte);
         }
     }
 
@@ -494,20 +516,27 @@ int debugger_execv(char *pathname, char *const argv[],
     debugger.rbp = 0;
 
     debugger.child = fork();
-    if (debugger.child == 0) {
+    if (debugger.child == -1) {
+        return errno;
+    } else if (debugger.child == 0) {
         ptrace(PTRACE_TRACEME, 0, NULL, NULL);
         execv(pathname, argv);
+        exit(127);
     } else {
         int state = 0;
+        int res   = 0;
 
         while(1) {
             int status;
             if (waitpid(debugger.child, &status, 0) < 0) {
-                perror("waitpid");
+                res = errno;
                 break;
             }
-            if(WIFEXITED(status))
+            if (WIFEXITED(status)) {
+                if (WEXITSTATUS(status) == 127)
+                    res = ENOENT;
                 break;
+            }
 
             struct user_regs_struct regs;
             uint8_t int3_buf[sizeof(long)];
@@ -562,21 +591,31 @@ int debugger_execv(char *pathname, char *const argv[],
                 }
 
                 size_t n_args;
+                debugger.rbp = regs.rbp;
                 StgWord *args = get_args(&debugger, infoTable, &regs, &n_args);
 
-                debugger.rbp = regs.rbp;
-
+                int res;
                 uint8_t save_byte;
-                if (state == 2 || debugger.callbacks->breakpoint_hit(&debugger, regs.rip, n_args, args, &save_byte)) {
+                if (state == 2 || (res = debugger.callbacks->breakpoint_hit(&debugger, regs.rip, n_args, args, &save_byte)) != 0) {
+                    if (res > 2) {
+                        ptrace(PTRACE_KILL, debugger.child, 0, NULL);
+                        break;
+                    }
+
                     *((long*) &int3_buf) =
                         ptrace(PTRACE_PEEKDATA, debugger.child, regs.rip, NULL);
                     int3_buf[0] = save_byte;
                     ptrace(PTRACE_POKEDATA, debugger.child, regs.rip, *((void**) &int3_buf));
 
                     ptrace(PTRACE_SETREGS, debugger.child, NULL, &regs);
-                    ptrace(PTRACE_SINGLESTEP, debugger.child, NULL, NULL);
 
-                    state = 3;
+                    if (res == 1) {
+                        ptrace(PTRACE_SINGLESTEP, debugger.child, NULL, NULL);
+                        state = 3;
+                    } else {
+                        ptrace(PTRACE_CONT, debugger.child, NULL, NULL);
+                        state = 1;
+                    }
                 } else {
                     ptrace(PTRACE_CONT, debugger.child, NULL, NULL);
                 }
@@ -599,6 +638,8 @@ int debugger_execv(char *pathname, char *const argv[],
 
         if (debugger.dwfl != NULL)
             dwfl_end(debugger.dwfl);
+
+        return res;
     }
 }
 
@@ -624,6 +665,7 @@ StgClosure *copy_closure_helper(Debugger *debugger, GElf_Addr addr,
     if (size == 0) {
         size = sizeof(StgClosure);
     }
+
     *psize = size;
 
     char  *name = NULL;
@@ -670,7 +712,7 @@ StgClosure *copy_closure_helper(Debugger *debugger, GElf_Addr addr,
     done:;
     }
 
-    char *copy = malloc(sizeof(buf)+size+name_len);
+    char *copy = malloc(sizeof(buf)+size+name_len+1);
     if (!copy) {
         free(name);
         return NULL;
@@ -739,4 +781,13 @@ void debugger_free_closure(Debugger *debugger, StgClosure *closure)
     if (closure == NULL)
         return;
     free(((char*) closure) - INFO_TABLE_MAX_SIZE);
+}
+
+void debugger_poke(Debugger* debugger, GElf_Addr addr, uint8_t byte)
+{
+    uint8_t int3_buf[sizeof(long)];
+    *((long*) &int3_buf) =
+        ptrace(PTRACE_PEEKDATA, debugger->child, addr, NULL);
+    int3_buf[0] = byte;
+    ptrace(PTRACE_POKEDATA, debugger->child, addr, *((void**) &int3_buf));
 }
