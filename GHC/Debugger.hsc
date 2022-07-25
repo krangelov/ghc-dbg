@@ -1,7 +1,7 @@
-module HDB(startDebugger,LinkerName,SourceSpan,SourceSpans
-          ,HeapPtr
-          ,Debugger(..),DebuggerAction(..)
-          ) where
+module GHC.Debugger(startDebugger,LinkerName,SourceSpan,SourceSpans
+                   ,HeapPtr
+                   ,Debugger(..),DebuggerAction(..)
+                   ) where
 
 import Foreign
 import Foreign.C

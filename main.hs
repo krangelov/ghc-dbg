@@ -7,8 +7,8 @@ import Control.Monad
 import Control.Monad.IO.Class
 import GHC.Exts.Heap
 import GHC.Exts.Heap.InfoTable
+import GHC.Debugger
 import Numeric (showHex)
-import HDB
 import Text.Encoding.Z
 import Text.PrettyPrint.Annotated.HughesPJ hiding (render)
 import Data.IORef
