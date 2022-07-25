@@ -827,14 +827,14 @@ showName opts name
 
     reconstruct s
       | s1 == "info"   = x1
-      | s2 == "info"   = (if optShowModule opts
+      | s2 == "info"   = (if show_mod
                             then zDecodeString x1++"."
                             else "")++
                          (zDecodeString x2)
-      | otherwise      = (if optShowPackage opts
+      | otherwise      = (if show_pkg
                             then zDecodeString x1++":"
                             else "")++
-                         (if optShowModule opts
+                         (if show_mod
                             then zDecodeString x2++"."
                             else "")++
                          (zDecodeString x3)
