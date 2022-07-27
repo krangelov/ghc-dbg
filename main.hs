@@ -737,7 +737,9 @@ ppHeapTree d opts (HC name (Word64Closure _ v)) = integer (fromIntegral v)
 ppHeapTree d opts (HC name (DoubleClosure _ v)) = double v
 ppHeapTree d opts (HC name clo) =
   case tipe (info clo) of
-    CONSTR        -> ppData name clo
+    CONSTR        -> case extractTuple (HC name clo) of
+                       Just elems -> parens (sep (punctuate comma (map (ppHeapTree d opts) elems)))
+                       Nothing    -> ppData name clo
     CONSTR_0_1
       | name == "base_GHCziInt_I32zh_con_info"
                   -> hsep (map (integer . fromIntegral) (dataArgs clo))
@@ -845,6 +847,22 @@ ppHeapTree d opts (HC name clo) =
             _   -> Nothing
     extractString _ = Nothing
 
+    extractTuple (HC name clo)
+      | name == "ghczmprim_GHCziTuple_Z3T_con_info" ||
+        name == "ghczmprim_GHCziTuple_Z4T_con_info" ||
+        name == "ghczmprim_GHCziTuple_Z5T_con_info" ||
+        name == "ghczmprim_GHCziTuple_Z6T_con_info" ||
+        name == "ghczmprim_GHCziTuple_Z7T_con_info" ||
+        name == "ghczmprim_GHCziTuple_Z8T_con_info" ||
+        name == "ghczmprim_GHCziTuple_Z9T_con_info" ||
+        name == "ghczmprim_GHCziTuple_Z10T_con_info" ||
+        name == "ghczmprim_GHCziTuple_Z11T_con_info" ||
+        name == "ghczmprim_GHCziTuple_Z12T_con_info" ||
+        name == "ghczmprim_GHCziTuple_Z13T_con_info" ||
+        name == "ghczmprim_GHCziTuple_Z14T_con_info" ||
+        name == "ghczmprim_GHCziTuple_Z15T_con_info"
+                   = Just (ptrArgs clo)
+    extractTuple _ = Nothing
 
 
 ppHeapTree d opts (HF t ts) =
