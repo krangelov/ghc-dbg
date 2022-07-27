@@ -648,8 +648,7 @@ peekHeapState dbg name args = do
         Nothing -> do mb_clo <- peekClosure dbg ptr
                       case mb_clo of
                         Nothing         -> return (env, True, HP ptr)
-                        Just (name,clo) -> do appendFile "log.txt" (name++"\n")
-                                              let env1 = Map.insert ptr (1,True,HP ptr) env
+                        Just (name,clo) -> do let env1 = Map.insert ptr (1,True,HP ptr) env
                                               (env2,zero,clo) <- down out env1 clo
                                               let env3 = Map.adjust (\(c,_,_) -> (c,zero,HC name clo)) ptr env2
                                                   res  = case Map.lookup ptr out of
@@ -794,7 +793,7 @@ ppHeapTree d opts (HC name clo) =
     MUT_ARR_PTRS_FROZEN_CLEAN -> ppMutArray clo
     MUT_ARR_PTRS_FROZEN_DIRTY -> ppMutArray clo
     UPDATE_FRAME  -> let pargs = map (ppHeapTree 1 opts) (hvalues clo)
-                     in (text "<Update" <+> sep pargs <> char '>')
+                     in parens (text (showName opts name) <+> sep pargs)
     CATCH_FRAME   -> let pargs = map (ppHeapTree 1 opts) (hvalues clo)
                      in (text "<Catch" <+> sep (map (integer . fromIntegral) (rawWords clo)++pargs) <> char '>')
     STOP_FRAME    -> ppOther name clo
