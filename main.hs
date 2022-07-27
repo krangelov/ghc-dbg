@@ -648,7 +648,8 @@ peekHeapState dbg name args = do
         Nothing -> do mb_clo <- peekClosure dbg ptr
                       case mb_clo of
                         Nothing         -> return (env, True, HP ptr)
-                        Just (name,clo) -> do let env1 = Map.insert ptr (1,True,HP ptr) env
+                        Just (name,clo) -> do appendFile "log.txt" (name++"\n")
+                                              let env1 = Map.insert ptr (1,True,HP ptr) env
                                               (env2,zero,clo) <- down out env1 clo
                                               let env3 = Map.adjust (\(c,_,_) -> (c,zero,HC name clo)) ptr env2
                                                   res  = case Map.lookup ptr out of
@@ -749,7 +750,13 @@ ppHeapTree d opts (HC name clo) =
       | name == "ghczmprim_GHCziTuple_Z2T_con_info"
                   -> let pargs = map (ppHeapTree 0 opts) (ptrArgs clo)
                      in parens (sep (punctuate comma pargs))
-      | otherwise -> ppData name clo
+      | otherwise -> case extractList (HC name clo) of
+                       Just lst -> case extractString lst of
+                                     Just s  -> text (show s)
+                                     Nothing -> char '[' <>
+                                                sep (punctuate comma (map (ppHeapTree d opts) lst)) <>
+                                                char ']'
+                       Nothing  -> ppData name clo
     CONSTR_1_0    -> ppData name clo
     CONSTR_NOCAF  -> ppOther name clo
     FUN           -> ppData name clo
@@ -817,6 +824,29 @@ ppHeapTree d opts (HC name clo) =
     ppMutArray clo =
       let elems = map (ppHeapTree 1 opts) (mccPayload clo)
       in text "<MUT_ARR" <+> sep elems <> char '>'
+
+    extractList (HC name clo)
+      | name == "ghczmprim_GHCziTypes_ZMZN_con_info" = Just []
+      | name == "ghczmprim_GHCziTypes_ZC_con_info"   =
+          case ptrArgs clo of
+            [x,y] -> case extractList y of
+                       Just xs -> Just (x:xs)
+                       Nothing -> Nothing
+            _     -> Nothing
+    extractList _ = Nothing
+
+    extractString []                                = return []
+    extractString (HC name clo:ts)
+      | name == "ghczmprim_GHCziTypes_Czh_con_info" =
+          case dataArgs clo of
+            [n] -> do let c = chr (fromIntegral n)
+                      cs <- extractString ts
+                      return (c:cs)
+            _   -> Nothing
+    extractString _ = Nothing
+
+
+
 ppHeapTree d opts (HF t ts) =
   apply' d (ppHeapTree 1 opts t) (map (ppArgument opts) ts)
 ppHeapTree d opts (HE t) =
