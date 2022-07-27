@@ -12,7 +12,8 @@ typedef struct {
     void (*register_scope)(int start_line,int start_col,int end_line,int end_col);
     void (*register_name)(const char* name, GElf_Addr addr, uint8_t save_byte);
     int (*breakpoint_hit)(Debugger *debugger,
-                          GElf_Addr addr, size_t n_args, StgWord *args, uint8_t *save_byte);
+                          StgInfoTable *infoTable, GElf_Addr addr,
+                          StgHalfWord fun_type, StgWord *args, uint8_t *save_byte);
 } DebuggerCallbacks;
 
 int debugger_execv(char *pathname, char *const argv[],

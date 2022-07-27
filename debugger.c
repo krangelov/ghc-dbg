@@ -27,14 +27,19 @@
 
 #define DW_LANG_Haskell 0x18
 
-union StgMaxInfoTable {
-  StgFunInfoTable fun;
-  StgRetInfoTable ret;
-  StgConInfoTable con;
-  StgThunkInfoTable thunk;
+#define MAX_LARGE_BITMAP 128
+struct StgMaxInfoTable {
+    StgLargeBitmap large_bitmap;
+    StgWord pad[(MAX_LARGE_BITMAP+sizeof(StgWord)*8-1)/(sizeof(StgWord)*8)];  // Enough space to support 128 arguments
+    union {
+      StgFunInfoTable fun;
+      StgRetInfoTable ret;
+      StgConInfoTable con;
+      StgThunkInfoTable thunk;
+    } i;
 };
 
-#define INFO_TABLE_MAX_SIZE sizeof(union StgMaxInfoTable)
+#define INFO_TABLE_MAX_SIZE sizeof(struct StgMaxInfoTable)
 
 struct Debugger {
     pid_t child;
@@ -67,6 +72,7 @@ StgInfoTable *copy_infotable(Debugger *debugger,
     StgInfoTable *infoTable =
         (StgInfoTable *) (buf + INFO_TABLE_MAX_SIZE - sizeof(StgInfoTable));
 
+    bool is_fun     = false;
     switch (infoTable->type) {
     case FUN:
     case FUN_0_1:
@@ -75,6 +81,7 @@ StgInfoTable *copy_infotable(Debugger *debugger,
     case FUN_2_0:
     case FUN_1_0:
     case FUN_STATIC:
+        is_fun = true;
         sz = sizeof(StgFunInfoTable);
         break;
     case RET_BCO:
@@ -114,6 +121,46 @@ StgInfoTable *copy_infotable(Debugger *debugger,
                    NULL);
         if (errno != 0)
             return NULL;
+    }
+
+    StgWord *bitmap_src = NULL;
+    if (is_fun) {
+        StgFunInfoTable *funInfoTable =
+            (StgFunInfoTable *) (buf + INFO_TABLE_MAX_SIZE - sizeof(StgFunInfoTable));
+        if (funInfoTable->f.fun_type == ARG_GEN_BIG) {
+            bitmap_src = ((StgWord *) addr) + funInfoTable->f.b.bitmap_offset;
+            funInfoTable->f.b.bitmap_offset =
+                ((StgWord*) buf)-((StgWord*) (funInfoTable+1));
+        }
+    } else if (infoTable->type == RET_BIG) {
+        bitmap_src = ((StgWord *) addr) + infoTable->layout.large_bitmap_offset;
+        infoTable->layout.large_bitmap_offset =
+            ((StgWord*) buf)-((StgWord*) (infoTable+1));
+    }
+
+    if (bitmap_src != NULL) {
+        StgLargeBitmap *large_bitmap = (StgLargeBitmap *) buf;
+
+        large_bitmap->size =
+            ptrace(PTRACE_PEEKDATA,
+                   debugger->child,
+                   bitmap_src++,
+                   NULL);
+        if (errno != 0)
+            return NULL;
+        if (large_bitmap->size > MAX_LARGE_BITMAP)
+            return NULL;
+
+        size_t b = 0;
+        for (size_t i = 0; i < large_bitmap->size; i += sizeof(StgWord)*8) {
+            large_bitmap->bitmap[b++] =
+                ptrace(PTRACE_PEEKDATA,
+                       debugger->child,
+                       bitmap_src++,
+                       NULL);
+            if (errno != 0)
+                return NULL;
+        }
     }
 
     return infoTable;
@@ -263,16 +310,52 @@ debugger_closure_sizeW(Debugger *debugger,
 }
 
 static
+StgWord *save_vanila_args(Debugger *debugger,
+                          StgWord r1_value,
+                          struct user_regs_struct *regs,
+                          size_t n_args)
+{
+    StgWord *args = malloc(sizeof(StgWord)*n_args);
+    if (args == NULL)
+        return NULL;
+    StgWord *p = args;
+
+    if (n_args > 0) *(p++) = r1_value;
+    if (n_args > 1) *(p++) = regs->r14;
+    if (n_args > 2) *(p++) = regs->rsi;
+    if (n_args > 3) *(p++) = regs->rdi;
+    if (n_args > 4) *(p++) = regs->r8;
+    if (n_args > 5) *(p++) = regs->r9;
+    if (n_args > 6) {
+        size_t i = 6;
+        while (i < n_args) {
+            *(p++) =
+                ptrace(PTRACE_PEEKDATA,
+                       debugger->child,
+                       debugger->rbp,
+                       NULL);
+            if (errno != 0) {
+                free(args);
+                return NULL;
+            }
+            debugger->rbp += sizeof(StgWord);
+            i++;
+        }
+    }
+
+    return args;
+}
+
+static
 StgWord *get_args(Debugger *debugger,
                   StgInfoTable *infoTable,
                   struct user_regs_struct *regs,
-                  size_t *p_n_args)
+                  struct user_fpregs_struct *fpregs,
+                  StgHalfWord *p_fun_type)
 {
-    *p_n_args = 0;
+    GElf_Addr r1_value = regs->rbx;
+    *p_fun_type = ARG_NONE;
 
-    GElf_Addr closure_ptr = 0;
-
-    int n_args = 0;
     switch (infoTable->type) {
     case FUN_STATIC: {
         Dwfl_Module *mod = dwfl_addrmodule(debugger->dwfl, regs->rip);
@@ -292,7 +375,7 @@ StgWord *get_args(Debugger *debugger,
                 Dwarf_Addr bias;
 
                 const char *curr_name =
-                    dwfl_module_getsym_info(mod, i, &sym, &closure_ptr,
+                    dwfl_module_getsym_info(mod, i, &sym, &r1_value,
                                             &shndx,
                                             &elf, &bias);
                 if (strcmp(curr_name, closure_name) == 0) {
@@ -310,23 +393,60 @@ StgWord *get_args(Debugger *debugger,
     case FUN_1_0: {
         StgFunInfoTable *funInfoTable = (StgFunInfoTable *)
             (((char *) infoTable) - offsetof(StgFunInfoTable,i));
-        n_args = 1;
+        *p_fun_type = funInfoTable->f.fun_type;
         switch (funInfoTable->f.fun_type) {
-        case ARG_GEN: n_args += BITMAP_SIZE(funInfoTable->f.b.bitmap); break;
-        case ARG_NONE:                  break;
-        case ARG_N:                     break;
-        case ARG_NN:                    break;
-        case ARG_NNN:                   break;
-        case ARG_P:        n_args += 1; break;
-        case ARG_PP:       n_args += 2; break;
-        case ARG_PPP:      n_args += 3; break;
-        case ARG_PPPP:     n_args += 4; break;
-        case ARG_PPPPP:    n_args += 5; break;
-        case ARG_PPPPPP:   n_args += 6; break;
-        case ARG_PPPPPPP:  n_args += 7; break;
-        case ARG_PPPPPPPP: n_args += 8; break;
-        default:
-            n_args += funInfoTable->f.arity;
+        case ARG_GEN:
+            return save_vanila_args(debugger,r1_value,regs,
+                                    BITMAP_SIZE(funInfoTable->f.b.bitmap)+1);
+        case ARG_GEN_BIG: {
+            return save_vanila_args(debugger,r1_value,regs,
+                                    GET_FUN_LARGE_BITMAP(funInfoTable)->size);
+        }
+        case ARG_BCO:
+            return save_vanila_args(debugger,r1_value,regs,
+                                    BCO_BITMAP_SIZE(funInfoTable)+1);
+        case ARG_NONE:
+            return save_vanila_args(debugger,r1_value,regs,1);
+        case ARG_N:
+        case ARG_P:
+            return save_vanila_args(debugger,r1_value,regs,2);
+        case ARG_F:
+        case ARG_D: {
+            StgFloat *args = malloc(sizeof(StgFloat));
+            if (args == NULL)
+                return NULL;
+            args[0] = *((StgFloat *) fpregs->xmm_space);
+            return (StgWord *) args;
+        }
+        case ARG_L:
+        case ARG_V16:
+        case ARG_V32:
+        case ARG_V64:
+            return save_vanila_args(debugger,r1_value,regs,1);
+        case ARG_NN:
+        case ARG_NP:
+        case ARG_PN:
+        case ARG_PP:
+            return save_vanila_args(debugger,r1_value,regs,3);
+        case ARG_NNN:
+        case ARG_NNP:
+        case ARG_NPN:
+        case ARG_NPP:
+        case ARG_PNN:
+        case ARG_PNP:
+        case ARG_PPN:
+        case ARG_PPP:
+            return save_vanila_args(debugger,r1_value,regs,4);
+        case ARG_PPPP:
+            return save_vanila_args(debugger,r1_value,regs,5);
+        case ARG_PPPPP:
+            return save_vanila_args(debugger,r1_value,regs,6);
+        case ARG_PPPPPP:
+            return save_vanila_args(debugger,r1_value,regs,7);
+        case ARG_PPPPPPP:
+            return save_vanila_args(debugger,r1_value,regs,8);
+        case ARG_PPPPPPPP:
+            return save_vanila_args(debugger,r1_value,regs,9);
         }
         break;
     }
@@ -350,53 +470,18 @@ StgWord *get_args(Debugger *debugger,
     case BLACKHOLE:
     case CATCH_FRAME:
     case STOP_FRAME:
-        n_args = 1;
-        break;
+        return save_vanila_args(debugger,r1_value,regs,1);
     case RET_BCO:
     case RET_SMALL:
     case RET_BIG:
     case RET_FUN:
     case UPDATE_FRAME:
-        n_args = 1;
         // The stack for return frames doesn't always contain info ptr
         ptrace(PTRACE_POKEDATA, debugger->child, regs->rbp, regs->rip);
-        break;
-    default:
-        return NULL;
+        return save_vanila_args(debugger,r1_value,regs,1);
     }
 
-    *p_n_args = n_args;
-
-    StgWord *args = malloc(sizeof(StgWord)*n_args);
-    if (args == NULL)
-        return NULL;
-    StgWord *p = args;
-
-    if (n_args > 0) *(p++) = closure_ptr ? closure_ptr : regs->rbx;
-    if (n_args > 1) *(p++) = regs->r14;
-    if (n_args > 2) *(p++) = regs->rsi;
-    if (n_args > 3) *(p++) = regs->rdi;
-    if (n_args > 4) *(p++) = regs->r8;
-    if (n_args > 5) *(p++) = regs->r9;
-    if (n_args > 6) {
-        size_t i = 6;
-        while (i < n_args) {
-            *(p++) =
-                ptrace(PTRACE_PEEKDATA,
-                       debugger->child,
-                       debugger->rbp,
-                       NULL);
-            if (errno != 0) {
-                free(args);
-                return NULL;
-            }
-            debugger->rbp += sizeof(StgWord);
-            i++;
-        }
-    }
-
-    *p_n_args = n_args;
-    return args;
+    return NULL; // should not happen
 }
 
 static
@@ -539,6 +624,7 @@ int debugger_execv(char *pathname, char *const argv[],
             }
 
             struct user_regs_struct regs;
+            struct user_fpregs_struct fpregs;
             uint8_t int3_buf[sizeof(long)];
 
             if (state == 0) {
@@ -582,6 +668,8 @@ int debugger_execv(char *pathname, char *const argv[],
                 ptrace(PTRACE_GETREGS, debugger.child, NULL, &regs);
                 regs.rip--;
 
+                ptrace(PTRACE_GETFPREGS, debugger.child, NULL, &fpregs);
+
                 char buf[INFO_TABLE_MAX_SIZE];
                 StgInfoTable *infoTable =
                     copy_infotable(&debugger, regs.rip, buf);
@@ -590,13 +678,13 @@ int debugger_execv(char *pathname, char *const argv[],
                     exit(1);
                 }
 
-                size_t n_args;
+                StgHalfWord fun_type;
                 debugger.rbp = regs.rbp;
-                StgWord *args = get_args(&debugger, infoTable, &regs, &n_args);
+                StgWord *args = get_args(&debugger, infoTable, &regs, &fpregs, &fun_type);
 
                 int res;
                 uint8_t save_byte;
-                if (state == 2 || (res = debugger.callbacks->breakpoint_hit(&debugger, regs.rip, n_args, args, &save_byte)) != 0) {
+                if (state == 2 || (res = debugger.callbacks->breakpoint_hit(&debugger, infoTable, regs.rip, fun_type, args, &save_byte)) != 0) {
                     if (res > 2) {
                         ptrace(PTRACE_KILL, debugger.child, 0, NULL);
                         break;

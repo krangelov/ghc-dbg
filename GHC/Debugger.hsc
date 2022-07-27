@@ -1,6 +1,6 @@
 module GHC.Debugger(startDebugger,LinkerName,SourceSpan,SourceSpans
                    ,HeapPtr
-                   ,Debugger(..),DebuggerAction(..)
+                   ,Debugger(..),DebuggerAction(..), Argument(..)
                    ) where
 
 import Foreign
@@ -39,7 +39,14 @@ data DebuggerAction
   | Continue [LinkerName]   -- ^ Continue the program until one of the
                             -- listed names is encountered
 
-startDebugger :: [String] -> (Debugger -> LinkerName -> Maybe SourceSpans -> [HeapPtr] -> IO DebuggerAction) -> IO ()
+data Argument a
+  = N Word
+  | P a
+  | F (#type StgFloat)
+  | D (#type StgDouble)
+  deriving Show
+
+startDebugger :: [String] -> (Debugger -> LinkerName -> Maybe SourceSpans -> [Argument HeapPtr] -> IO DebuggerAction) -> IO ()
 startDebugger args handleEvent =
   withArgs args $ \c_prog_args@(c_prog:_) ->
   withArray0 nullPtr c_prog_args $ \c_prog_args ->
@@ -102,11 +109,11 @@ startDebugger args handleEvent =
           (cu,ss,dies,names,action) <- readIORef ref
           writeIORef ref $! (cu,ss,dies,Map.insert addr (name,save_byte) names,action)
 
-        breakpoint_hit ref dbg addr n_args args p_save_byte = do
+        breakpoint_hit ref dbg infoTable addr fun_type args p_save_byte = do
           (cu,ss,dies,names,action) <- readIORef ref
           case Map.lookup addr names of
             Just (name,save_byte) -> do poke p_save_byte save_byte
-                                        args <- peekArray (fromIntegral n_args) args
+                                        args <- peekArgs fun_type
                                         let die = Map.lookup name dies
                                         new_action <- handleEvent (wrapDebugger ref dbg) name die args
                                         writeIORef ref (cu,ss,dies,names,new_action)
@@ -120,6 +127,153 @@ startDebugger args handleEvent =
                                              | otherwise              -> set_breakpoints    dbg name names bs1 >>
                                                                          remove_breakpoints dbg name names bs2
             Nothing               -> do return 0
+          where
+            peekArgs (#const ARG_GEN) = do
+              p0 <- peekByteOff args 0
+              let funInfoTable =
+                    infoTable
+                    `plusPtr`
+                    ((#size StgInfoTable) - (#size StgFunInfoTable))
+              bitmap <- (#peek StgFunInfoTable, f.b.bitmap) funInfoTable
+              args <- peekBitmap (bitmap `shiftR` bitmap_BITS_SHIFT)
+                                 (bitmap .&. bitmap_SIZE_MASK)
+                                 (args `plusPtr` (#size StgWord))
+              return (P p0:args)
+            peekArgs (#const ARG_GEN_BIG) = do
+              p0 <- peekByteOff args 0
+              let funInfoTable =
+                    infoTable
+                    `plusPtr` 
+                    ((#size StgInfoTable) - (#size StgFunInfoTable))
+              offset <- (#peek StgFunInfoTable, f.b.bitmap_offset) funInfoTable
+              let bitmapPtr =
+                    funInfoTable
+                    `plusPtr` 
+                    ((#size StgFunInfoTable) + offset)
+              args <- peekLargeBitmap bitmapPtr
+                                      (args `plusPtr` (#size StgWord))
+              return (P p0:args)
+            peekArgs (#const ARG_NONE) = do
+              p0 <- peekByteOff args 0
+              return [P p0]
+            peekArgs (#const ARG_N)    = do
+              p0 <- peekByteOff args 0
+              n1 <- peekByteOff args (#size StgWord)
+              return [P p0, N n1]
+            peekArgs (#const ARG_P)    = do
+              p0 <- peekByteOff args 0
+              p1 <- peekByteOff args (#size StgWord)
+              return [P p0, P p1]
+            peekArgs (#const ARG_F)    = do
+              p0 <- peekByteOff args 0
+              f1 <- peekByteOff args (#size StgWord)
+              return [P p0, F (realToFrac (f1 :: Double))]
+            peekArgs (#const ARG_D)    = do
+              p0 <- peekByteOff args 0
+              d1 <- peekByteOff args (#size StgWord)
+              return [P p0, D d1]
+            peekArgs (#const ARG_NN)    = do
+              p0 <- peekByteOff args 0
+              n1 <- peekByteOff args (#size StgWord)
+              n2 <- peekByteOff args ((#size StgWord) * 2)
+              return [P p0, N n1, N n2]
+            peekArgs (#const ARG_NP)    = do
+              p0 <- peekByteOff args 0
+              n1 <- peekByteOff args (#size StgWord)
+              p2 <- peekByteOff args ((#size StgWord) * 2)
+              return [P p0, N n1, P p2]
+            peekArgs (#const ARG_PN)    = do
+              p0 <- peekByteOff args 0
+              p1 <- peekByteOff args (#size StgWord)
+              n2 <- peekByteOff args ((#size StgWord) * 2)
+              return [P p0, P p1, N n2]
+            peekArgs (#const ARG_PP)    = do
+              p0 <- peekByteOff args 0
+              p1 <- peekByteOff args (#size StgWord)
+              p2 <- peekByteOff args ((#size StgWord) * 2)
+              return [P p0, P p1, P p2]
+            peekArgs (#const ARG_NNN)    = do
+              p0 <- peekByteOff args 0
+              n1 <- peekByteOff args (#size StgWord)
+              n2 <- peekByteOff args ((#size StgWord) * 2)
+              n3 <- peekByteOff args ((#size StgWord) * 3)
+              return [P p0, N n1, N n2, N n3]
+            peekArgs (#const ARG_NNP)    = do
+              p0 <- peekByteOff args 0
+              n1 <- peekByteOff args (#size StgWord)
+              n2 <- peekByteOff args ((#size StgWord) * 2)
+              p3 <- peekByteOff args ((#size StgWord) * 3)
+              return [P p0, N n1, N n2, P p3]
+            peekArgs (#const ARG_NPN)    = do
+              p0 <- peekByteOff args 0
+              n1 <- peekByteOff args (#size StgWord)
+              p2 <- peekByteOff args ((#size StgWord) * 2)
+              n3 <- peekByteOff args ((#size StgWord) * 3)
+              return [P p0, N n1, P p2, N n3]
+            peekArgs (#const ARG_NPP)    = do
+              p0 <- peekByteOff args 0
+              n1 <- peekByteOff args (#size StgWord)
+              p2 <- peekByteOff args ((#size StgWord) * 2)
+              p3 <- peekByteOff args ((#size StgWord) * 3)
+              return [P p0, N n1, P p2, P p3]
+            peekArgs (#const ARG_PNN)    = do
+              p0 <- peekByteOff args 0
+              p1 <- peekByteOff args (#size StgWord)
+              n2 <- peekByteOff args ((#size StgWord) * 2)
+              n3 <- peekByteOff args ((#size StgWord) * 3)
+              return [P p0, P p1, N n2, N n3]
+            peekArgs (#const ARG_PNP)    = do
+              p0 <- peekByteOff args 0
+              p1 <- peekByteOff args (#size StgWord)
+              n2 <- peekByteOff args ((#size StgWord) * 2)
+              p3 <- peekByteOff args ((#size StgWord) * 3)
+              return [P p0, P p1, N n2, P p3]
+            peekArgs (#const ARG_PPN)    = do
+              p0 <- peekByteOff args 0
+              p1 <- peekByteOff args (#size StgWord)
+              p2 <- peekByteOff args ((#size StgWord) * 2)
+              n3 <- peekByteOff args ((#size StgWord) * 3)
+              return [P p0, P p1, P p2, N n3]
+            peekArgs (#const ARG_PPP)    = do
+              p0 <- peekByteOff args 0
+              p1 <- peekByteOff args (#size StgWord)
+              p2 <- peekByteOff args ((#size StgWord) * 2)
+              p3 <- peekByteOff args ((#size StgWord) * 3)
+              return [P p0, P p1, P p2, P p3]
+            peekArgs (#const ARG_PPPP)    = do
+              p0 <- peekByteOff args 0
+              p1 <- peekByteOff args (#size StgWord)
+              p2 <- peekByteOff args ((#size StgWord) * 2)
+              p3 <- peekByteOff args ((#size StgWord) * 3)
+              p4 <- peekByteOff args ((#size StgWord) * 4)
+              return [P p0, P p1, P p2, P p3, P p4]
+            peekArgs (#const ARG_PPPPP)    = do
+              p0 <- peekByteOff args 0
+              p1 <- peekByteOff args (#size StgWord)
+              p2 <- peekByteOff args ((#size StgWord) * 2)
+              p3 <- peekByteOff args ((#size StgWord) * 3)
+              p4 <- peekByteOff args ((#size StgWord) * 4)
+              p5 <- peekByteOff args ((#size StgWord) * 5)
+              return [P p0, P p1, P p2, P p3, P p4, P p5]
+            peekArgs (#const ARG_PPPPPP)    = do
+              p0 <- peekByteOff args 0
+              p1 <- peekByteOff args (#size StgWord)
+              p2 <- peekByteOff args ((#size StgWord) * 2)
+              p3 <- peekByteOff args ((#size StgWord) * 3)
+              p4 <- peekByteOff args ((#size StgWord) * 4)
+              p5 <- peekByteOff args ((#size StgWord) * 5)
+              p6 <- peekByteOff args ((#size StgWord) * 6)
+              return [P p0, P p1, P p2, P p3, P p4, P p5, P p6]
+            peekArgs (#const ARG_PPPPPPP)    = do
+              p0 <- peekByteOff args 0
+              p1 <- peekByteOff args (#size StgWord)
+              p2 <- peekByteOff args ((#size StgWord) * 2)
+              p3 <- peekByteOff args ((#size StgWord) * 3)
+              p4 <- peekByteOff args ((#size StgWord) * 4)
+              p5 <- peekByteOff args ((#size StgWord) * 5)
+              p6 <- peekByteOff args ((#size StgWord) * 6)
+              p7 <- peekByteOff args ((#size StgWord) * 7)
+              return [P p0, P p1, P p2, P p3, P p4, P p5, P p6, P p7]
 
         add_scope s []      = [s]
         add_scope s (s':ss) =
@@ -288,6 +442,7 @@ startDebugger args handleEvent =
         MUT_VAR_CLEAN -> ptr1Closure MutVarClosure
         MUT_VAR_DIRTY -> ptr1Closure MutVarClosure
         RET_SMALL     -> retSmall
+        RET_BIG       -> retBig
         CATCH_FRAME   -> catchFrame
 {-            WEAK          -> weakClosure -}
 {-            SMALL_MUT_ARR_PTRS_CLEAN -> smallMutArrPtrsClosure
@@ -367,10 +522,24 @@ startDebugger args handleEvent =
           return (ArrWordsClosure itbl bytes payload)
 
         retSmall = do
-          let bitmap = (nptrs itbl `shiftL` 32) .|. (ptrs itbl)
-          (ps,ws) <- peekBitmap (bitmap .&. bitmap_SIZE_MASK)
-                                (bitmap `shiftR` bitmap_BITS_SHIFT)
-                                (pclosure `plusPtr` (#size StgHeader))
+          bitmap <- (#peek StgInfoTable, layout.bitmap)
+                         (pclosure `plusPtr` (- (#size StgInfoTable)))
+          args <- peekBitmap (bitmap `shiftR` bitmap_BITS_SHIFT)
+                             (bitmap .&. bitmap_SIZE_MASK)
+                             (pclosure `plusPtr` (#size StgHeader))
+          let ps = [p | P p <- args]
+              ws = [w | N w <- args]
+          return (OtherClosure itbl ps ws)
+
+        retBig = do
+          offset <- (#peek StgInfoTable, layout.large_bitmap_offset)
+                         (pclosure `plusPtr` (- (#size StgInfoTable)))
+          let bitmapPtr =
+                pclosure `plusPtr` offset
+          args <- peekLargeBitmap bitmapPtr
+                                  (pclosure `plusPtr` (#size StgHeader))
+          let ps = [p | P p <- args]
+              ws = [w | N w <- args]
           return (OtherClosure itbl ps ws)
 
         catchFrame = do
@@ -396,16 +565,32 @@ startDebugger args handleEvent =
           ws <- peekArray (fromIntegral (nptrs itbl)) pwords
           return (ps,ws)
 
-        peekBitmap size bitmap ptr
-          | size == 0 = return ([],[])
-          | bitmap .&. 1 == 0 = do
-              p <- peek (castPtr ptr)
-              (ps,ws) <- peekBitmap (size-1) (bitmap `shiftR` 1) (ptr `plusPtr` (sizeOf (undefined :: HeapPtr)))
-              return (p:ps,ws)
-          | bitmap .&. 1 == 1 = do
-              w <- peek (castPtr ptr)
-              (ps,ws) <- peekBitmap (size-1) (bitmap `shiftR` 1) (ptr `plusPtr` (sizeOf (undefined :: Word)))
-              return (ps,w:ws)
+    peekBitmap bitmap size ptr
+      | size == 0         = return []
+      | bitmap .&. 1 == 0 = do
+          p    <- peek (castPtr ptr)
+          args <- peekBitmap (bitmap `shiftR` 1) (size-1) (ptr `plusPtr` (#size StgWord))
+          return (P p:args)
+      | bitmap .&. 1 == 1 = do
+          n <- peek (castPtr ptr)
+          args <- peekBitmap (bitmap `shiftR` 1) (size-1) (ptr `plusPtr` (#size StgWord))
+          return (N n:args)
+
+    peekLargeBitmap largeBitmapPtr ptr = do
+      size <- (#peek StgLargeBitmap, size) largeBitmapPtr
+      let bitmapPtr = largeBitmapPtr `plusPtr` (#offset StgLargeBitmap, bitmap)
+      peekValues bitmapPtr size ptr
+      where
+        peekValues :: Ptr (#type StgWord) -> (#type StgWord) -> Ptr a -> IO [Argument HeapPtr]
+        peekValues bitmapPtr 0    ptr = return []
+        peekValues bitmapPtr size ptr = do
+          bitmap <- peek bitmapPtr
+          let size' = min ((#size StgWord)*8) size
+          args1 <- peekBitmap bitmap size' ptr
+          args2 <- peekValues (bitmapPtr `plusPtr` (#size StgWord))
+                              (size-size')
+                              (ptr `plusPtr` ((#size StgWord)*fromIntegral size'))
+          return (args1++args2)
 
 nullaryConstrsSet = Set.fromList
   [ "ghczmprim_GHCziTypes_True_con_info"
@@ -430,7 +615,7 @@ nullaryConstrsSet = Set.fromList
 
 #include "debugger.h"
 
-bitmap_SIZE_MASK  = 0x3f
+bitmap_SIZE_MASK  = 0x3f :: (#type StgWord)
 bitmap_BITS_SHIFT = 6
 
 data DebuggerCallbacks
@@ -449,4 +634,4 @@ foreign import ccall "wrapper" wrapRegisterCompUnit :: Wrapper (CString -> CStri
 foreign import ccall "wrapper" wrapRegisterSubProg :: Wrapper (CString -> IO ())
 foreign import ccall "wrapper" wrapRegisterScope :: Wrapper (CInt -> CInt -> CInt -> CInt -> IO ())
 foreign import ccall "wrapper" wrapRegisterName :: Wrapper (CString -> (#type GElf_Addr) -> (#type uint8_t) -> IO ())
-foreign import ccall "wrapper" wrapBreakpointHit :: Wrapper (Ptr Debugger -> (#type GElf_Addr) -> CSize -> Ptr (#type StgWord) -> Ptr (#type uint8_t) -> IO CInt)
+foreign import ccall "wrapper" wrapBreakpointHit :: Wrapper (Ptr Debugger -> Ptr a -> (#type GElf_Addr) -> (#type StgHalfWord) -> Ptr (#type StgWord) -> Ptr (#type uint8_t) -> IO CInt)

@@ -620,7 +620,7 @@ foreign import ccall safe endwin :: IO CInt
 data HeapTree
   = HP HeapPtr                      -- ^ pointer to a shared node
   | HC String (GenClosure HeapTree) -- ^ heap closure
-  | HF HeapTree [HeapTree]          -- ^ a stack frame
+  | HF HeapTree [Argument HeapTree] -- ^ a stack frame
   | HE HeapTree                     -- ^ what is beeing executed now
   deriving Show
 
@@ -628,11 +628,11 @@ peekHeapState dbg name args = do
   (env,t) <- fixIO $ \res -> do
                         let out = fst res
                             env = Map.empty
-                        (env,t:args) <- peekHeapArgs out env args
+                        (env,P t:args) <- peekHeapArgs out env args
                         stk <- getStack dbg
                         case stk of
                           ((name',clo):stk) | name==name' -> do (env,_,clo) <- down out env clo
-                                                                appStack out env stk (HE (HF (HC name clo) [HF t args]))
+                                                                appStack out env stk (HE (HF (HC name clo) [P (HF t args)]))
                           _                               -> appStack out env stk (HE (HF t args))
   let ptrs = fmap thd (Map.filter (\(c,zero,_) -> c > 1 && not zero) env)
   return (ptrs,t)
@@ -660,7 +660,7 @@ peekHeapState dbg name args = do
     appStack out env []               t = return (env,t)
     appStack out env ((name,clo):stk) t = do
       (env,zero,clo) <- down out env clo
-      appStack out env stk (HF (HC name clo) [t])
+      appStack out env stk (HF (HC name clo) [P t])
 
     down out env clo@(IntClosure info v) = return (env, True, IntClosure info v)
     down out env clo@(Int64Closure info v) = return (env, True, Int64Closure info v)
@@ -675,15 +675,15 @@ peekHeapState dbg name args = do
                   THUNK,      THUNK_0_1,  THUNK_0_2,
                   THUNK_1_1,  THUNK_2_0,  THUNK_1_0,
                   THUNK_STATIC] =
-          do (env2,args) <- peekHeapArgs out env (ptrArgs clo)
+          do (env2,args) <- peekHeapArgs out env (map P (ptrArgs clo))
              let zero = name == "base_GHCziInt_I32zh_con_info" ||
                         name == "ghczmprim_GHCziTypes_Czh_con_info" ||
                         null (ptrArgs clo) && null (dataArgs clo)
-             return (env2, zero, clo{ptrArgs=args})
+             return (env2, zero, clo{ptrArgs=map unP args})
       | elem typ [AP, PAP] =
           do (env2,_,fun) <- peekHeapTree out env (fun clo)
-             (env3,pld) <- peekHeapArgs out env2 (payload clo)
-             return (env3, null pld, clo{fun=fun, payload=pld})
+             (env3,pld) <- peekHeapArgs out env2 (map P (payload clo))
+             return (env3, null pld, clo{fun=fun, payload=map unP pld})
       | elem typ [IND, IND_STATIC, BLACKHOLE] =
           do (env2,zero,ind) <- peekHeapTree out env (indirectee clo)
              return (env2,zero,clo{indirectee=ind})
@@ -700,21 +700,28 @@ peekHeapState dbg name args = do
           do return (env, False, clo{arrWords=arrWords clo})
       | elem typ [MUT_ARR_PTRS_CLEAN, MUT_ARR_PTRS_DIRTY,
                   MUT_ARR_PTRS_FROZEN_CLEAN, MUT_ARR_PTRS_FROZEN_DIRTY]=
-          do (env2,elems) <- peekHeapArgs out env (mccPayload clo)
-             return (env2, False, clo{mccPayload=elems})
+          do (env2,elems) <- peekHeapArgs out env (map P (mccPayload clo))
+             return (env2, False, clo{mccPayload=map unP elems})
       | typ == INVALID_OBJECT =
           do return (env, False, UnsupportedClosure (info clo))
       | otherwise =
-          do (env2,args) <- peekHeapArgs out env (hvalues clo)
+          do (env2,args) <- peekHeapArgs out env (map P (hvalues clo))
              let zero = null (hvalues clo) && null (rawWords clo)
-             return (env2, zero, clo{hvalues=args})
+             return (env2, zero, clo{hvalues=map unP args})
       where
         typ  = tipe (info clo)
 
     peekHeapArgs out env []       = return (env, [])
-    peekHeapArgs out env (x : xs) = do (env, _, x) <- peekHeapTree out env x
-                                       (env, xs)   <- peekHeapArgs out env xs
+    peekHeapArgs out env (x : xs) = do (env, x ) <- case x of
+                                                      N x -> do return (env,N x)
+                                                      P p -> do (env, _, t) <- peekHeapTree out env p
+                                                                return (env,P t)
+                                                      F f -> do return (env,F f)
+                                                      D d -> do return (env,D d)
+                                       (env, xs) <- peekHeapArgs out env xs
                                        return (env, x : xs)
+
+    unP (P t) = t
 
 data HeapTreeAnn
   = FunName LinkerName
@@ -811,11 +818,16 @@ ppHeapTree d opts (HC name clo) =
       let elems = map (ppHeapTree 1 opts) (mccPayload clo)
       in text "<MUT_ARR" <+> sep elems <> char '>'
 ppHeapTree d opts (HF t ts) =
-  apply' d (ppHeapTree 1 opts t) (map (ppHeapTree 1 opts) ts)
+  apply' d (ppHeapTree 1 opts t) (map (ppArgument opts) ts)
 ppHeapTree d opts (HE t) =
   annotate Current (ppHeapTree 1 opts t)
 
 ppHeapPtr ptr = char '#' <> text (showHex ptr "")
+
+ppArgument opts (N n) = int (fromIntegral n)
+ppArgument opts (P t) = ppHeapTree 1 opts t
+ppArgument opts (F f) = float  f
+ppArgument opts (D d) = double d
 
 showName opts name
   | name == "ZCMain_main_info" = ":Main_main_info"
