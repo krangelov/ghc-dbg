@@ -817,7 +817,7 @@ StgClosure *copy_closure_helper(Debugger *debugger, GElf_Addr addr,
                    NULL);
         if (errno != 0) {
             free(name);
-            free(closure);
+            free(copy);
             perror("copy_closure");
             return NULL;
         }
