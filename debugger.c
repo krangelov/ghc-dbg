@@ -18,7 +18,7 @@
 #define DW_AT_name 0x03
 #define DW_AT_language 0x13
 #define DW_AT_comp_dir 0x1b
-#define DW_AT_MIPS_linkage_name 0x2007
+#define DW_AT_linkage_name 0x6e
 #define DW_AT_ghc_span_file 0x2b00
 #define DW_AT_ghc_span_start_line 0x2b01
 #define DW_AT_ghc_span_start_col 0x2b02
@@ -518,7 +518,7 @@ int collect_infos(Dwfl_Module *mod, void ** x,
             while (res == 0) {
                 if (dwarf_tag(&subprog) == DW_TAG_subprogram) {
                     const char *fun_name = NULL;
-                    if (dwarf_attr(&subprog, DW_AT_MIPS_linkage_name, &attr) != NULL) {
+                    if (dwarf_attr(&subprog, DW_AT_linkage_name, &attr) != NULL) {
                          fun_name = attr.valp;
                     }
 
